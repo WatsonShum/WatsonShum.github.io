@@ -2,7 +2,7 @@
 <feed xmlns="http://www.w3.org/2005/Atom">
     <id>https://WatsonShum.github.io</id>
     <title>Watson’s Blog</title>
-    <updated>2022-01-03T06:57:50.005Z</updated>
+    <updated>2022-01-08T03:03:17.686Z</updated>
     <generator>https://github.com/jpmonette/feed</generator>
     <link rel="alternate" href="https://WatsonShum.github.io"/>
     <link rel="self" href="https://WatsonShum.github.io/atom.xml"/>
@@ -10,6 +10,22 @@
     <logo>https://WatsonShum.github.io/images/avatar.png</logo>
     <icon>https://WatsonShum.github.io/favicon.ico</icon>
     <rights>All rights reserved 2022, Watson’s Blog</rights>
+    <entry>
+        <title type="html"><![CDATA[吐槽]]></title>
+        <id>https://WatsonShum.github.io/post/tu-cao/</id>
+        <link href="https://WatsonShum.github.io/post/tu-cao/">
+        </link>
+        <updated>2022-01-08T02:59:30.000Z</updated>
+        <content type="html"><![CDATA[<ol>
+<li>每次加好友只会一句话“同学，你有啥事吗？”，虽然我不迷恋你但是起码表达了我的兴趣，都主动给你打两次招呼了，你连我名字都记不住吗？我这么没地位？每次气得我都主动把好友删了，然后每次都这样，我就再也不加她好友了。</li>
+<li>打招呼从来不回，咱也是鼓起勇气打招呼，说的好听点儿叫主动创造两人熟悉的机会，起码回一下是基本礼貌吧。</li>
+<li>谈话时莫名奇妙离场，英语差我也没嫌弃啊，咋不也想显摆一下吗？什么人嘛，太不礼貌了。</li>
+<li>盲目自恋，还以为别人要跟着她蹭饭似的，耍小心眼儿把人支走。直接说不行吗？士可杀不可辱。更何况我也没那个想法。然后刚好放假我就决定永远不理她，然后疫情😷导致不能去学校，最终大半年没理她。</li>
+<li>这点儿太恶心了，不想写了。</li>
+</ol>
+<p>总结：无法理解。可能缺我一个不少？还是英语专业妹子香，又温柔又体贴。</p>
+]]></content>
+    </entry>
     <entry>
         <title type="html"><![CDATA[115被封事件]]></title>
         <id>https://WatsonShum.github.io/post/115-bei-feng-shi-jian/</id>
