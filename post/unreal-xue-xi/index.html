@@ -1,0 +1,224 @@
+<html>
+<head>
+    <meta charset="utf-8" />
+<meta name="description" content="" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<title>Unreal5.0学习 | 维圣的技术博客</title>
+
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1700226409009">
+
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/css/bootstrap.min.css"> -->
+
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets/highlight.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages/dockerfile.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages//dart.min.js"></script>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.27.0/moment.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/js/bootstrap.min.js"></script> -->
+<!-- DEMO JS -->
+<!--<script src="media/scripts/index.js"></script>-->
+
+
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.css">
+    
+</head>
+<body>
+<div class="main gt-bg-theme-color-first">
+    <nav class="navbar navbar-expand-lg">
+    <a class="navbar-brand" href="/">
+        <img class="user-avatar" src="/images/avatar.png" alt="头像">
+        <div class="site-name gt-c-content-color-first">
+            维圣的技术博客
+        </div>
+    </a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
+        aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation" id="changeNavbar">
+        <i class="fas fa-bars gt-c-content-color-first" style="font-size: 18px"></i>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <div class="navbar-nav mr-auto" style="text-align: center">
+            
+            <div class="nav-item">
+                
+                <a href="/" class="menu gt-a-link">
+                    首页
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/archives" class="menu gt-a-link">
+                    归档
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/tags" class="menu gt-a-link">
+                    标签
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/post/about" class="menu gt-a-link">
+                    关于
+                </a>
+                
+            </div>
+            
+        </div>
+        <div style="text-align: center">
+            <form id="gridea-search-form" style="position: relative" data-update="1700226409009"
+                action="/search/">
+                <input class="search-input" autocomplete="off" spellcheck="false" name="q" placeholder="搜索文章" />
+                <i class="fas fa-search gt-c-content-color-first" style="position: absolute; top: 9px; left: 10px;"></i>
+            </form>
+        </div>
+    </div>
+</nav>
+<script>
+    /* 移动端导航栏展开/收起切换 */
+    document.getElementById('changeNavbar').onclick = () => {
+        var element = document.getElementById('navbarSupportedContent');
+        if (element.style.display === 'none' || element.style.display === '') {
+            element.style.display = 'block';
+        } else {
+            element.style.display = 'none';
+        }
+    }
+</script>
+
+    <div class="post-container">
+        <div class="post-detail gt-bg-theme-color-second">
+            <article class="gt-post-content">
+                <h2 class="post-title">
+                    Unreal5.0学习
+                </h2>
+                <div class="post-info">
+                    <time class="post-time gt-c-content-color-first">
+                        · 2023-10-04 ·
+                    </time>
+                    
+                        <a href="https://WatsonShum.github.io/tag/BvSf8mR6m/" class="post-tags">
+                            # 学习
+                        </a>
+                    
+                </div>
+                <div class="post-content">
+                    <h1 id="背景">背景</h1>
+<p>自己对于计算机图形学一直比较感兴趣，已经有过相关的经历，之前使用Unigine这样一款三维引擎做过开发，工作后也积累了OpenGL经验。但是对于主流的Game Engine还没有上手经验，于是就在Youtube上找了一个<a href="https://www.youtube.com/watch?v=k-zMkzmduqI&amp;t=3785s">学习视频</a>开始学习。此篇Post是对学习过程的简单记录。</p>
+<h1 id="操作和窗口">操作和窗口</h1>
+<p>自己之前接触过SolidWorks等三维软件，Unreal的操作和窗口布局和之前接触过三维软件差不多，所以就不详细记录了。</p>
+<h1 id="material-graph">Material Graph</h1>
+<p>Material是计算机图形学中十分重要的一个概念，应用广泛，除了可以储存颜色之外，还可以当作Mask以及当作normal map。<br>
+Unreal的纹理是基于PBR的，包括基础颜色，Metallic、Roughness等选项，可以通过Material Graph已可视化的方式来编辑。同时还有个类似与Class-Instance的系统，可以创建一个Material模板，然后生成相应的Instance，模板中的parameter是可变的。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401081311.png" alt="" loading="lazy"></p>
+<h1 id="light-source">Light Source</h1>
+<p>有下面几种光源：</p>
+<ul>
+<li>Directional Light（Sun Light）</li>
+<li>Point Light</li>
+<li>Spot Light</li>
+<li>Reactangle Light<br>
+属性包括temperature和Intensity等，也是模拟真实世界，米家的智能家具灯泡就包括这几种可调的参数。</li>
+</ul>
+<h1 id="lumen">Lumen</h1>
+<p>是一种real time global illumination，使用方法：</p>
+<ul>
+<li>在PostProcessVolumn中设置全局光照-方法为Lumen，设置反射-方法为Lumen</li>
+<li>Light Source需要设置为Movable<br>
+之前的方法都不是实时的，需要进行Bake，生成的是一张Texture。可以做到的效果会好很多，但是每次修改参数都需要重新构建。</li>
+</ul>
+<h1 id="landscape">Landscape</h1>
+<p>Landscape模式用于创建地形，提供了多种笔刷，常用的有雕刻、平滑、平整等。可以通过纹理给地表添加颜色。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401094587.png" alt="" loading="lazy"></p>
+<h1 id="quixel-bridge">Quixel Bridge</h1>
+<p>Quixel Bridge是一个在线的免费的digital asset资料库，有3D模型以及Surface等内容。导入的方法也十分简单，直接拖拽就可以了，会自动在Content Drawer里面创建一个Megascans的文件夹。</p>
+<h1 id="foliage-mode">Foliage Mode</h1>
+<p>Foliage模式用于绘制地表植物，<br>
+可以从从Quixel里面导入植物，然后有一些材质Parameter可以使用，比如Color Variation, Wind等。打开具体的static mesh可以看到LOD，LOD0是最近的，LOD4完全就是一张图片了，也就是billboard。<br>
+编辑植物和编辑Landscape差不多，都是通过笔刷。 在Foliage中也可以使用Select功能，控制每一株植物的位置。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401102598.png" alt="" loading="lazy"></p>
+<h1 id="nanite">Nanite</h1>
+<p>一种很厉害的技术，能够自动实现LOD而不丢失细节，同时性能还有保证。启用方法十分简单，直接在Content Drawer里面右键物体选择Enable Nanite就可以了。可以直接从Quixel中下载Nanite格式的资产。</p>
+<h1 id="blueprint">BluePrint</h1>
+<p>BluePrint是Unreal的Visual Scripting Language，导入Third-person shoot feature pack后，可以得到一个默认的Character和BluePrint，可以在World Setting的GameMode Override启用BP_ThirdPersonGameMode。双击这个Character就以打开BluePrint的编辑界面，得到一个类似Material Graph的Event Grapgh。</p>
+<ul>
+<li>可以通过PlayerStart这个Object来指定Player出生的地点。</li>
+<li>还有一个可视化Debug的功能</li>
+<li>自己感觉BluePrint是基于Publish-Subsrcibe的思路设计的，通过事件把整个流程串起来，用户也可以自己定义事件。</li>
+</ul>
+<h1 id="castle-environment">Castle Environment</h1>
+<p>在这个项目中会将之前用到的知识综合应用，创建出一个游戏场景。整体的制作顺序是Large-&gt;Medium-&gt;Detail：</p>
+<ul>
+<li>在Large的制作阶段，创建了Lanscape，用笔刷刷出了一些地形，创建了湖泊，导入纹理当作远方背景。</li>
+<li>在Medium阶段，添加了3D Mesh作为悬崖，这让场景看起来更加真实。</li>
+<li>之后添加了Unreal的自带商城里面导入了megascan的树木资产包，设置风速和季节等属性。</li>
+<li>之后添加了城堡，城堡是模块化设计，由许多组件组装而成。<br>
+下图是最终的效果：<br>
+<img src="https://WatsonShum.github.io/post-images/1696401112924.png" alt="" loading="lazy"></li>
+</ul>
+
+                </div>
+            </article>
+        </div>
+
+        
+            <div class="next-post">
+                <div class="next gt-c-content-color-first">下一篇</div>
+                <a href="https://WatsonShum.github.io/post/xue-xi-cherno-de-raytracer-jiao-cheng/" class="post-title gt-a-link">
+                    学习Cherno的RayTracer教程
+                </a>
+            </div>
+        
+
+        
+
+        
+
+        
+
+        <div class="site-footer gt-c-content-color-first">
+    <div class="slogan gt-c-content-color-first">吾生也有涯，而知也无涯。以有涯随无涯，殆已！</div>
+    <div class="social-container">
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+    </div>
+    <div class="footer-info">
+        Powered by <a href="https://github.com/getgridea/gridea" target="_blank">Gridea</a>
+    </div>
+    <div>
+        Theme <a href="https://github.com/imhanjie/gridea-theme-pure" target="_blank">Pure</a>, Powered by <a
+                href="https://gridea.dev" target="_blank">Gridea</a> | <a href="https://WatsonShum.github.io/atom.xml" target="_blank">RSS</a>
+    </div>
+</div>
+
+<script>
+  hljs.highlightAll()
+</script>
+
+    </div>
+</div>
+</body>
+</html>

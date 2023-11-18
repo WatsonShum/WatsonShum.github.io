@@ -1,0 +1,187 @@
+<html>
+<head>
+    <meta charset="utf-8" />
+<meta name="description" content="" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<title>Cpp实现一个简单的事件系统 | 维圣的技术博客</title>
+
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1700226409009">
+
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/css/bootstrap.min.css"> -->
+
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets/highlight.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages/dockerfile.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages//dart.min.js"></script>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.27.0/moment.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/js/bootstrap.min.js"></script> -->
+<!-- DEMO JS -->
+<!--<script src="media/scripts/index.js"></script>-->
+
+
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.css">
+    
+</head>
+<body>
+<div class="main gt-bg-theme-color-first">
+    <nav class="navbar navbar-expand-lg">
+    <a class="navbar-brand" href="/">
+        <img class="user-avatar" src="/images/avatar.png" alt="头像">
+        <div class="site-name gt-c-content-color-first">
+            维圣的技术博客
+        </div>
+    </a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
+        aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation" id="changeNavbar">
+        <i class="fas fa-bars gt-c-content-color-first" style="font-size: 18px"></i>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <div class="navbar-nav mr-auto" style="text-align: center">
+            
+            <div class="nav-item">
+                
+                <a href="/" class="menu gt-a-link">
+                    首页
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/archives" class="menu gt-a-link">
+                    归档
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/tags" class="menu gt-a-link">
+                    标签
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/post/about" class="menu gt-a-link">
+                    关于
+                </a>
+                
+            </div>
+            
+        </div>
+        <div style="text-align: center">
+            <form id="gridea-search-form" style="position: relative" data-update="1700226409009"
+                action="/search/">
+                <input class="search-input" autocomplete="off" spellcheck="false" name="q" placeholder="搜索文章" />
+                <i class="fas fa-search gt-c-content-color-first" style="position: absolute; top: 9px; left: 10px;"></i>
+            </form>
+        </div>
+    </div>
+</nav>
+<script>
+    /* 移动端导航栏展开/收起切换 */
+    document.getElementById('changeNavbar').onclick = () => {
+        var element = document.getElementById('navbarSupportedContent');
+        if (element.style.display === 'none' || element.style.display === '') {
+            element.style.display = 'block';
+        } else {
+            element.style.display = 'none';
+        }
+    }
+</script>
+
+    <div class="post-container">
+        <div class="post-detail gt-bg-theme-color-second">
+            <article class="gt-post-content">
+                <h2 class="post-title">
+                    Cpp实现一个简单的事件系统
+                </h2>
+                <div class="post-info">
+                    <time class="post-time gt-c-content-color-first">
+                        · 2023-08-12 ·
+                    </time>
+                    
+                </div>
+                <div class="post-content">
+                    <h1 id="缘起">缘起</h1>
+<p>最近在工作的时候发现现在的事件系统设计得十分奇怪，自己之前写过C#，个人觉得C#的事件系统十分地好用，但是项目中用的是Cpp，于是经过调研，最终参考了这篇文章<a href="https://bastian.rieck.me/blog/posts/2015/event_system_cxx11/">Implement A Simple Event System in Cpp11</a>，经改造后用到了项目中，个人感觉效果还不错。决定记录一下，整理出一篇文章。<br>
+<strong>事先说明，本文有部分内容来自那篇英文文章，少部分为个人思考。</strong></p>
+<h1 id="框架">框架</h1>
+<p>事件系统一般会使用<a href="https://refactoring.guru/design-patterns/observer">订阅/发布模式</a>，简单来说包括以下概念：</p>
+<ul>
+<li>Event：事件，可以是一个字符串，也可以是一个类，表示一种事件类型</li>
+<li>Event Handler：事件处理函数，当某种事件发生时，会调用这个函数</li>
+<li>Event Sender：事件的触发者。</li>
+<li>Event Dispatcher：事件分发器，负责将事件发送给对应的事件处理函数。<br>
+最底层的数据结构就是一个hashmap，用于储存事件类型和事件处理函数的对应关系。<pre><code class="language-cpp">unordered_map&lt;Event,vector&lt;EventHandler&gt;&gt; inner_data;
+</code></pre>
+</li>
+</ul>
+<p>其中 <code>Event</code> 可以十分简单，比如一个表示事件类型的一个字符串，也可以包括更多的事件信息。<code>EventHandler</code>，本质来说就是一个函数指针，表示处理这种事件的函数。由于一种Event可以有多个handler了，所以使用vector储存这些handler。<br>
+针对上面<code>inner_data</code>有两种基本的读写操作，第一种是增加一种Event和Handler的匹配关系，也就是Subscribe：</p>
+<pre><code class="language-cpp">void Subscribe(Event event, EventHandler event_handler){
+    inner_data[event].push_back(event_handler);
+}
+</code></pre>
+<p>第二种操作是触发某种Event，也就是SendMessage：</p>
+<pre><code class="language-cpp">void SendMessage(Event event){
+    for(auto handler:inner_data[event]){
+        handler();
+    }
+}
+</code></pre>
+
+                </div>
+            </article>
+        </div>
+
+        
+
+        
+
+        
+
+        
+
+        <div class="site-footer gt-c-content-color-first">
+    <div class="slogan gt-c-content-color-first">吾生也有涯，而知也无涯。以有涯随无涯，殆已！</div>
+    <div class="social-container">
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+    </div>
+    <div class="footer-info">
+        Powered by <a href="https://github.com/getgridea/gridea" target="_blank">Gridea</a>
+    </div>
+    <div>
+        Theme <a href="https://github.com/imhanjie/gridea-theme-pure" target="_blank">Pure</a>, Powered by <a
+                href="https://gridea.dev" target="_blank">Gridea</a> | <a href="https://WatsonShum.github.io/atom.xml" target="_blank">RSS</a>
+    </div>
+</div>
+
+<script>
+  hljs.highlightAll()
+</script>
+
+    </div>
+</div>
+</body>
+</html>
