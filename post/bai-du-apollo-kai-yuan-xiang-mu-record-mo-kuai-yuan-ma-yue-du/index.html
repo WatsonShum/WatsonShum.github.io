@@ -1,0 +1,185 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>百度 Apollo 开源项目 Record 模块源码阅读 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1742463656057">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="百度 Apollo 开源项目 Record 模块源码阅读 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="百度的 Apollo 项目在自动驾驶领域是一个知名的项目，自动驾驶涉及许多数据，例如传感器数据，算法中间数据，Apollo项目在存储这些数据的时候使用了自定义的 Record格式，之前自己一直使用这个模块，但是对于深层次的原理没有一探究竟，..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1742463656057" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              百度 Apollo 开源项目 Record 模块源码阅读
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-03-20
+              </span>
+              <span>
+                2 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>百度的 Apollo 项目在自动驾驶领域是一个知名的项目，自动驾驶涉及许多数据，例如传感器数据，算法中间数据，Apollo项目在存储这些数据的时候使用了自定义的 Record格式，之前自己一直使用这个模块，但是对于深层次的原理没有一探究竟，最近有时间对其源码进行了阅读，写一些文字记录实现。</p>
+<h1 id="基本概念">基本概念</h1>
+<ul>
+<li>Section：表示的是每次往文件系统里面写入的数据量，假如 SectionSize 设置成 10M，那么内存中就会先累积数据，直到数据超过 10M，才会往文件系统里面写入。</li>
+<li>Segment：自动分文件，如果将 SegmentSize 设置成 1G，那么数据会每满 1G 就停止写入当前文件，而是创建一个文件重新写入。</li>
+</ul>
+<h1 id="基本数据结构">基本数据结构</h1>
+<h1 id="写入的实现">写入的实现</h1>
+<p>写入的实现是经典的单生产者和单消费者模式，同时加上了双缓冲模式。为什么要使用这个模式。而不是在当前线程直接写入。</p>
+<ul>
+<li>往文件系统写文件会触发系统 IO，如果直接在当前线程写入，会影响当前线程的效率。导致当前线程 CPU 空转。从而影响当前线程其他地方代码的执行效率。</li>
+<li>所以需要使用一个专门的线程来负责将数据写入文件系统。其他线程将数据放到一个地方， 消费者线程来获取。为了实现两个线程高效的数据通信，需要了双缓冲模式，即维护两个 chunk，生产者线程不断地往第一个 chunk 里面写数据，当第一个 chunk 满足一定条件后，将两个 chunk 互相交换，并通知消费者线程来消费第二个 chunk。循环往复。</li>
+<li></li>
+</ul>
+<h1 id="读取的实现">读取的实现</h1>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5">基本概念</a></li>
+<li><a href="#%E5%9F%BA%E6%9C%AC%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84">基本数据结构</a></li>
+<li><a href="#%E5%86%99%E5%85%A5%E7%9A%84%E5%AE%9E%E7%8E%B0">写入的实现</a></li>
+<li><a href="#%E8%AF%BB%E5%8F%96%E7%9A%84%E5%AE%9E%E7%8E%B0">读取的实现</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/zi-ji-shi-xian-yi-ge-tuple/">
+              <h3 class="post-title">
+                自己实现一个 Tuple
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>
