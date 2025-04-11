@@ -1,0 +1,654 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>自己实现一个 Tuple | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="自己实现一个 Tuple | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="C++ Template 是一项很有意思的技术，自己之前对于基本概念，比如 template method、variadic template、partial specialization 等都已经有了基础的掌握，最近发现了一个更加 adv..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              自己实现一个 Tuple
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-03-19
+              </span>
+              <span>
+                22 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/zi-ji-shi-xian-yi-ge-tuple.webp" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>C++ Template 是一项很有意思的技术，自己之前对于基本概念，比如 template method、variadic template、partial specialization 等都已经有了基础的掌握，最近发现了一个更加 advanced 的<a href="https://www.youtube.com/watch?v=VBI6TSo8Zog&amp;list=PLWxziGKTUvQFIsbbFcTZz7jOT4TMGnZBh">教程</a>，初步学习后感觉受益匪浅，对于其中的知识点想详细记录。<br>
+这个教程的最终结果是自己实现 std 中的 Tuple，并实现一些常用的功能，比如：</p>
+<ul>
+<li>empty</li>
+<li>size</li>
+<li>contains</li>
+<li>any</li>
+<li>front</li>
+<li>back</li>
+<li>at</li>
+<li>push_back</li>
+<li>pop_back</li>
+<li>transform</li>
+<li>filter</li>
+<li>cat</li>
+<li>...</li>
+</ul>
+<h1 id="empty">empty</h1>
+<p>empty函数的作用是检测<code>Tuple</code>里面是否有元素。</p>
+<pre><code class="language-c++">/*不那么通用的写法
+template &lt;typename TUPLE&gt;
+struct empty: std::false_type {};
+
+template &lt;typename TUPLE&gt;
+struct empty&lt;Tuple&lt;&gt;&gt; : std::true_type {};
+*/
+
+template &lt;typename LIST&gt;
+struct empty : std::false_type {};
+
+template &lt;template &lt;typename...&gt; class LIST&gt;
+struct empty&lt;LIST&lt;&gt;&gt; : std::true_type {};
+
+template &lt;typename LIST&gt;//别名
+static constexpr bool empty_v = empty&lt;LIST&gt;::value;
+
+//使用方法：
+empty_v&lt;type_list&lt;&gt;&gt;
+</code></pre>
+<p>有以下几点值得注意：</p>
+<ul>
+<li>使用了模板特化，主模板继承自<code>std::false_type {}</code>，value 会自动为 false。偏特化模板匹配了为空的情况，继承自<code>std::true_type</code>，value自动为 true。</li>
+<li>使用了 template template parameter，即将模板作为另一个模板的参数，好处是提高了泛用性。可以兼容自己写的<code>Tuple</code>，也可以兼容 <code>std::tuple</code>。</li>
+<li>定义了一个别名来简化代码和提高可读性。使用了 static 保证了当前变量局限在当前的编译单元，避免了全局符号冲突。</li>
+</ul>
+<h1 id="front">front</h1>
+<p>类似于 <code>std::vector</code> 中的 <code>front()</code>用来获取开头的元素类型。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;//辅助类， 用来被其他类继承，从而快速定义 type
+struct has_type {
+	using type = T;
+};
+
+template &lt;typename LIST&gt;//声明
+struct front;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename... T1toN&gt;
+struct front&lt;LIST&lt;T0, T1toN...&gt;&gt; : has_type&lt;T0&gt; {};//特化
+
+template &lt;typename LIST&gt;
+using front_t = typename front&lt;LIST&gt;::type;//别名
+</code></pre>
+<p>有以下几点值得注意：</p>
+<ul>
+<li>定义了 has_type<T>这个一个辅助struct，其他 struct 继承这个 struct 就可以创建一个类型成员。由于 struct 继承默认的关系是 public，所以不需要手动<code>public</code>修饰符。由于子类没有定义 type，所以不会出现 Name Hiding。</li>
+<li>将 template template parameter 和 variadic parameter 结合使用，用来匹配第一个元素。</li>
+<li>第一个声明如果去掉也不影响功能，只是为了创建别名语法更加方便。</li>
+</ul>
+<h1 id="pop_front">pop_front</h1>
+<p>和 <code>std::vector</code> 中的 <code>pop_front</code> 不一样的是，返回的不是被 pop 的第一个元素，而是返回剩下的元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST&gt;
+struct pop_front;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename... T1toN&gt;
+struct pop_front&lt;LIST&lt;T0, T1toN...&gt;&gt; : has_type&lt;LIST&lt;T1toN...&gt;&gt; {};
+
+template &lt;typename LIST&gt;
+using pop_front_t = typename pop_front&lt;LIST&gt;::type;
+</code></pre>
+<p>整个实现过程和前面的 <code>front&lt;T&gt;</code>十分类似，唯一有差别的地方是利用<code>has_type&lt;LIST&lt;T1toN...&gt;&gt;</code>返回剩下的元素。</p>
+<h1 id="back">back</h1>
+<p>和 <code>std::vector</code> 的 <code>back()</code>类似，返回最后一个元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST&gt;//主模板，利用了递归
+struct back : has_type&lt;typename back&lt;pop_front_t&lt;LIST&gt;&gt;::type&gt; {};
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0&gt;//特化
+struct back&lt;LIST&lt;T0&gt;&gt; : has_type&lt;T0&gt; {};
+
+template &lt;typename LIST&gt;//别名
+using back_t = typename back&lt;LIST&gt;::type;
+</code></pre>
+<p>实现的原理如下：</p>
+<ul>
+<li>
+<p>主模板使用了递归，不断地调用 <code>back&lt;T&gt;</code>，每次调用的时候使用之前实现的<code>pop_front_t</code>去掉开头的元素。</p>
+</li>
+<li>
+<p>偏特化模板定义了递归的 base case，当递归到这种情况的时候会自动停止。也就是当只有一个元素的时候，直接返回该元素。因为之前的元素都被 pop 掉了，所以该元素就是符合要求的元素。</p>
+</li>
+</ul>
+<p>值得注意的是，为什么不写成下面这样？</p>
+<pre><code class="language-c++">template &lt;template &lt;typename...&gt; class LIST, typename... T0toN_1, typename TN&gt;//特化
+struct back&lt;LIST&lt;T0toN_1...,TN&gt;&gt; : has_type&lt;TN&gt; {};
+</code></pre>
+<p>因为匹配规则是<code>T0toN_1...</code>很贪婪，会匹配完所有元素，导致最后 <code>TN</code>没有能匹配的元素，从而编译报错，所以写成这样不能达到目的。</p>
+<h1 id="push-back">push back</h1>
+<pre><code class="language-c++">template &lt;typename LIST, typename T&gt;//主模板
+struct push_back;
+
+template &lt;template &lt;typename...&gt; class LIST, typename... T0toN, typename T&gt;//特化
+struct push_back&lt;LIST&lt;T0toN...&gt;, T&gt; : has_type&lt;LIST&lt;T0toN..., T&gt;&gt; {};
+
+template &lt;typename LIST, typename T&gt;//别名
+using push_back_t = typename push_back&lt;LIST, T&gt;::type;
+</code></pre>
+<p>和前面相比，实现的逻辑很简单，就是将后面的元素添加到后面。</p>
+<h1 id="pop_back">pop_back</h1>
+<p>和 <code>std::vector</code> 的 <code>pop_back</code> 不同，返回的是 pop 后剩下的元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST, typename RET_LIST = make_same_container_t&lt;type_list&lt;&gt;, LIST&gt;&gt;
+struct pop_back;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename RET_LIST&gt;
+struct pop_back&lt;LIST&lt;T0&gt;, RET_LIST&gt; : has_type&lt;RET_LIST&gt; {};
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename T1, typename... T2toN, typename RET_LIST&gt;
+struct pop_back&lt;LIST&lt;T0, T1, T2toN...&gt;, RET_LIST&gt; : pop_back&lt;LIST&lt;T1, T2toN...&gt;, push_back_t&lt;RET_LIST, T0&gt;&gt; {};
+
+template &lt;typename LIST&gt;
+using pop_back_t = typename pop_back&lt;LIST&gt;::type;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>
+<p>创建了一个 <code>RET_LIST</code>作为变量构造返回值，利用递归来构造<code>RET_LIST</code>，在一次递归中将原始 LIST 将最前面的元素去掉，将这个元素加入到<code>RET_LIST</code>的最后面。类似于两个 queue 转移元素。递归结束的 base case 是当原始 LIST 只有一个元素的时候，返回 <code>RET_LIST</code>，这时候<code>RET_LIST</code>就是 pop 掉最后一个元素后剩下的其他元素。</p>
+</li>
+<li>
+<p>使用 default template parameter，它的用法和函数的默认参数一样，<code>typename RET_LIST = make_same_container_t&lt;type_list&lt;&gt;, LIST&gt;</code>在不显示指定的情况下，使用默认值。其实现原理如下：</p>
+<pre><code class="language-c++">template &lt;typename FROM_LIST, typename TO_LIST&gt;
+struct make_same_container;
+
+template &lt;template &lt;typename...&gt; class LIST,
+          typename... ELEMS,
+          template &lt;typename...&gt;
+          class TO_LIST,
+          typename... ELEMS2&gt;
+struct make_same_container&lt;LIST&lt;ELEMS...&gt;, TO_LIST&lt;ELEMS2...&gt;&gt; : has_type&lt;TO_LIST&lt;ELEMS...&gt;&gt; {};
+</code></pre>
+<p>在上面的用法中作用是创建了一个空的LIST，用作<code>RET_LIST</code>的初始值。</p>
+</li>
+</ul>
+<h1 id="at">at</h1>
+<p>支持根据索引来获取元素类型。</p>
+<pre><code class="language-c++">template &lt;typename LIST, size_t index&gt;//主模板，利用了递归
+struct at : has_type&lt;typename at&lt;pop_front_t&lt;LIST&gt;, index - 1&gt;::type&gt; {};
+
+template &lt;typename LIST&gt;//偏特化，递归的 base case
+struct at&lt;LIST, 0&gt; : has_type&lt;front_t&lt;LIST&gt;&gt; {};
+
+template &lt;typename LIST, size_t index&gt;//别名
+using at_t = typename at&lt;LIST, index&gt;::type;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>利用了递归，每次递归将 <code>index</code>减一，直到 <code>index</code> 为 0 的时候，使用之前之前实现的 <code>front_t</code>来获取目标元素。</li>
+</ul>
+<h1 id="any">any</h1>
+<p>any 操作指的是如果有一个元素满足条件，就返回 true，否则返回 false。用法：<code>any_v&lt;std::is_integral, type_list&lt;int, double, std::string&gt;&gt;</code></p>
+<pre><code class="language-c++">template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;
+struct any;
+
+template &lt;template &lt;typename&gt; class PREDICATE, template &lt;typename...&gt; class LIST&gt;//模板偏特化
+struct any&lt;PREDICATE, LIST&lt;&gt;&gt; : std::false_type {};
+
+template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;//主模板
+struct any : if_&lt;  // if predicate matches first type
+                 PREDICATE&lt;front_t&lt;LIST&gt;&gt;::value,
+                 // then
+                 std::true_type,
+                 // else
+                 typename any&lt;PREDICATE, pop_front_t&lt;LIST&gt;&gt;::type&gt;::type {};
+
+template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;//别名
+static constexpr bool any_v = any&lt;PREDICATE, LIST&gt;::value;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>主模板使用了递归，利用类似于三目运算符的 <code>if_</code>，首先利用 <code>front_t</code>来获取最前面的元素，如果条件满足，返回<code>std::true_type</code>,如果条件不满足，利用<code>pop_front_t</code>去掉最前面的元素后继续递归。</li>
+<li>偏特化提供了递归的 base case，也就是当 <code>LIST</code>为空的时候，返回<code>std::false_typ</code>。</li>
+<li>由于编译器并不确定<code>any&lt;PREDICATE, pop_front_t&lt;LIST&gt;&gt;::type&gt;::type</code>是 value 还是 type，默认的情况下会将其当作 value，所以需要加上 <code>typename</code> 关键字。</li>
+</ul>
+<p><code>三目运算符</code>的实现逻辑也十分简单，就是两个偏特化。</p>
+<pre><code class="language-c++">template &lt;bool condition, typename THEN, typename ELSE&gt;
+struct if_;
+
+template &lt;typename THEN, typename ELSE&gt;//偏特化
+struct if_&lt;true, THEN, ELSE&gt; : has_type&lt;THEN&gt; {};
+
+template &lt;typename THEN, typename ELSE&gt;//偏特化
+struct if_&lt;false, THEN, ELSE&gt; : has_type&lt;ELSE&gt; {};
+</code></pre>
+<h1 id="contains_type">contains_type</h1>
+<p>判断是否含有某个 type。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;
+struct same_as_pred {
+	template &lt;typename U&gt;
+	struct predicate : std::is_same&lt;T, U&gt; {};
+};
+
+template &lt;typename SEARCH, typename LIST&gt;
+static constexpr bool contains_type_v = any&lt;same_as_pred&lt;SEARCH&gt;::template predicate, LIST&gt;::value;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>借助之前实现的 <code>any</code>，自定义 PREDICATE 就可以了。可以使用 <code>std::is_same&lt;T, U&gt;</code>来判断当前元素是否和目标元素类型相同。但是 <code>any</code>中的 PREDICTATE只支持一个元素，所以我们进行一层封装，在 struct 里面再次嵌套 struct 解决了这个问题。</li>
+<li>由于编译器不确定<code>predicate</code>是<code>same_as_pred</code>的一个 value 还是 type。默认会当作 value，所以需要在使用的时候加上 typename，<code>same_as_pred&lt;SEARCH&gt;::template predicate</code>。</li>
+</ul>
+<h1 id="tuple_size">tuple_size</h1>
+<p>类似于 <code>std::vector</code> 的 <code>size()</code>。</p>
+<pre><code class="language-c++">template &lt;typename TUPLE&gt;//主模板声明
+struct tuple_size;
+template &lt;template &lt;typename...&gt; class Tuple,typename... ELEMS&gt;//特化
+struct tuple_size&lt;Tuple&lt;ELEMS...&gt;&gt; : std::integral_constant&lt;size_t, sizeof...(ELEMS)&gt; {};
+
+template &lt;typename TUPLE&gt;
+static constexpr size_t tuple_size_v = tuple_size&lt;TUPLE&gt;::value;//别名
+</code></pre>
+<ul>
+<li>使用了<code>sizeof...</code>操作符来获取 paramter pack 的元素个数</li>
+<li>继承自<code>std::integral_constant</code>，这样就可以自动创建一个 <code>value</code>成员变量。</li>
+</ul>
+<h1 id="tuple-数据结构">Tuple 数据结构</h1>
+<p>Tuple 是一种 异构的数据结构，即它里面的每一个元素的类型是可以不同的。对于 Tuple 的数据结构有两种实现方式，第一种方式是recursive inheritance。第二种是 multiple inheritance。视频中使用的方式是前者。<br>
+recursive inheritance 的基本原理是每次只表示最前面的一个元素，然后继承一个更小的 Tuple，直到只剩下一个元素。</p>
+<pre><code class="language-c++">template &lt;typename... ELEMS&gt;//主模板，主要用来处理为空的情况
+struct Tuple {
+	constexpr Tuple() = default;
+};
+
+template &lt;typename ELEM0, typename... ELEMS1toN&gt;
+struct Tuple&lt;ELEM0, ELEMS1toN...&gt; : Tuple&lt;ELEMS1toN...&gt; {//偏特化、被优先使用，处理至少有一个参数，继承更小的Tuple
+	template &lt;typename T, typename... Ts&gt;
+	explicit constexpr Tuple(T&amp;&amp; e1, Ts&amp;&amp;... rest);//构造函数，使用 member initializer 进行初始化
+	    : Tuple&lt;ELEMS1toN...&gt;(std::forward&lt;Ts&gt;(rest)...)// 调用基类进行初始化
+	    , data(std::forward&lt;T&gt;(e1)) {}//data 存储最前面的值
+	ELEM0 data;
+};
+</code></pre>
+<p>以 <code>Tuple&lt;int, char, double&gt; t(1, 'a', 3.14);</code>为例最终会形成如下的结构：</p>
+<pre><code class="language-c++">Tuple&lt;int, char, double&gt;  // 最外层
+    : Tuple&lt;char, double&gt;  // 中间层
+        : Tuple&lt;double&gt;    // 内层
+            : Tuple&lt;&gt;      // 最内层
+</code></pre>
+<p>有以下值得注意的点：</p>
+<ul>
+<li>
+<p>提供了一个主模板和偏特化，偏特化会优先使用，只有偏特化覆盖不了的地方，例如 Tuple 为空的情况才会使用主模板。</p>
+</li>
+<li>
+<p>使用了继承，对于对象不是虚函数，所以不存在多态，对于名称相同的类成员，规则是Name Hiding 和 Scope Rules。访问基类的方式是:</p>
+<pre><code class="language-c++">// 访问不同层级的data成员：
+t.data;                    // 访问最外层(int)的data
+t.Tuple&lt;char, double&gt;::data;  // 使用作用域解析运算符访问中间层(char)的data
+t.Tuple&lt;double&gt;::data;        // 使用作用域解析运算符访问内层(double)的data
+</code></pre>
+<p>现在已经可以 declare and define 一个 Tuple了，但是必须要显示地指明每一个元素的类型。<code>Tuple&lt;int, char, double&gt; t(1, 'a', 3.14);</code>我们可以添加一个 deduction guide用来自动推导。</p>
+</li>
+</ul>
+<pre><code class="language-c++">template &lt;typename T, typename... Ts&gt;
+Tuple(T e1, Ts... rest) -&gt; Tuple&lt;std::unwrap_ref_decay_t&lt;T&gt;, std::unwrap_ref_decay_t&lt;Ts&gt;...&gt;;?
+/*unwrap_ref_decay_t的作用：
+1. 移除引用
+2. 移除const/volatile限定符
+3. 将数组转换为指针
+4. 将函数类型转换为函数指针。
+*、
+</code></pre>
+<p>这样<code>Tuple t2(1, const int(2),int&amp;(x));</code> 会被自动推导为<code>Tuple&lt;int, int,int&gt;</code></p>
+<h1 id="forward_as_tuple">forward_as_tuple</h1>
+<p>作用是将parameter pack 变成一个 Tuple。</p>
+<pre><code class="language-c++">template &lt;typename... Ts&gt;
+constexpr auto forward_as_tuple(Ts&amp;&amp;... ts) noexcept {
+	return Tuple&lt;Ts&amp;&amp;...&gt;{std::forward&lt;Ts&gt;(ts)...};
+}
+</code></pre>
+<p>为什么不直接使用 这样的形式来构建<code>Tuple{ts...}</code>，因为之前定义了 deduction guide，直接使用这种形式会造成类型的退化，但是使用<code>Tuple&lt;Ts&amp;&amp;...&gt;{std::forward&lt;Ts&gt;(ts)...};</code>这样的形式，就能够完整地保留类型信息。</p>
+<pre><code class="language-c++">int x = 1;
+const int&amp; y = x;
+
+// 直接创建Tuple会丢失引用关系
+Tuple{x, y}  // 类型是 Tuple&lt;int, int&gt;
+
+// 使用forward_as_tuple保持引用关系
+forward_as_tuple(x, y)  // 类型是 Tuple&lt;int&amp;, const int&amp;&gt;
+</code></pre>
+<h1 id="get">get</h1>
+<p>类似于 <code>std::get&lt;index&gt;()</code>可以传入索引来获取 Tuple 的值，同时该支持赋值 ，例如<code>get&lt;1&gt;(tuple)=1</code>。</p>
+<pre><code class="language-c++">namespace detail {
+template &lt;size_t i, typename TUPLE&gt;//主模板
+struct get_impl : get_impl&lt;i - 1, pop_front_t&lt;TUPLE&gt;&gt; {};
+
+template &lt;typename TUPLE&gt;
+struct get_impl&lt;0, TUPLE&gt; {//特化
+	template &lt;typename T&gt;
+	constexpr static decltype(auto) get(T&amp;&amp; t) {
+		constexpr bool is_lvalue = std::is_lvalue_reference_v&lt;T&gt;;
+		constexpr bool is_const = std::is_const_v&lt;std::remove_reference_t&lt;T&gt;&gt;;
+		using data_t = front_t&lt;TUPLE&gt;;
+
+		if constexpr (is_lvalue &amp;&amp; is_const) {
+			return static_cast&lt;const data_t&amp;&gt;(static_cast&lt;const TUPLE&amp;&gt;(t).data);
+		}
+		if constexpr (is_lvalue &amp;&amp; !is_const) {
+			return static_cast&lt;data_t&amp;&gt;(static_cast&lt;TUPLE&amp;&gt;(t).data);
+		}
+		if constexpr (!is_lvalue &amp;&amp; is_const) {
+			return static_cast&lt;const data_t&amp;&amp;&gt;(static_cast&lt;const TUPLE&amp;&amp;&gt;(t).data);
+		}
+		if constexpr (!is_lvalue &amp;&amp; !is_const) {
+			return static_cast&lt;data_t&amp;&amp;&gt;(static_cast&lt;TUPLE&amp;&amp;&gt;(t).data);
+		}
+	}
+};
+}  // namespace detail
+
+template &lt;size_t i, typename TUPLE&gt;
+constexpr decltype(auto) get(TUPLE&amp;&amp; tuple) {
+	return detail::get_impl&lt;i, std::remove_cvref_t&lt;TUPLE&gt;&gt;::get(std::forward&lt;TUPLE&gt;(tuple));
+}
+</code></pre>
+<ul>
+<li>使用了<code>decltype(auto)</code>，相比于<code>auto</code>可以保留 const 和 引用等信息，保留引用可以之后实现赋值功能。</li>
+<li>实现了完美转发来减少复制和保留类型信息。</li>
+<li>主模板使用了递归，每次递归都将所以减1，偏特化提供了递归的 base case，就是当所以为 0 的时候，获取当前模板的 <code>data</code>成员变量，就是当前索引位置的值。</li>
+<li>获取了当前 <code>Tuple</code> 的类型信息，比如是lvalue、还是 rvalue，是否为 const，对应的将返回的值进行 static_cast。也就是得到值的类型和 <code>Tuple</code>的类型一致。</li>
+<li>使用了<code>std::remove_cvref_t</code>将<code>TUPLE</code>变成了一个裸类型，避免因为引用和限定符导致模板特化失败。但是在返回值的时候又将类型加了回去。</li>
+</ul>
+<h1 id="transfrom">transfrom</h1>
+<p>类似于 <code>std::transfrom</code>，但是是作用在 <code>Tuple</code> 上面。</p>
+<pre><code class="language-c++">namespace detail {
+template &lt;typename TUP, typename FUNC, size_t... indices&gt;
+constexpr auto transform_impl(TUP&amp;&amp; tup, const FUNC&amp; f, std::index_sequence&lt;indices...&gt;) {
+	return Tuple{f(get&lt;indices&gt;(std::forward&lt;TUP&gt;(tup)))...};
+}
+}  // namespace detail
+
+template &lt;typename TUP, typename FUNC&gt;
+constexpr auto transform(TUP&amp;&amp; tup, const FUNC&amp; f) {
+	return detail::transform_impl(std::forward&lt;TUP&gt;(tup),
+	                              f,
+	                              std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUP&gt;&gt;&gt;{});
+}
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>使用<code>std::make_index_sequence</code>结合 之前实现的<code>tuple_size_v</code>，创建了{0...size-1}的 index sequence。</li>
+<li>然后使用之前实现的<code>get&lt;indices&gt;()</code>获取每一个元素的值，然后作为参数传入 <code>FUNC&amp;</code>，<code>FUNC&amp;</code>执行完返回另外一个值，使用 fold expression <code>...</code>批量执行这个操作，所有元素会组成一个新的 <code>Tuple</code>。</li>
+<li>使用完美转发减少 <code>Tuple</code> 的复制。</li>
+</ul>
+<p>用法：</p>
+<pre><code class="language-c++">		Tuple tup{42, 'c', 12U};
+		auto tup2 = transform(std::forward&lt;decltype(tup)&gt;(tup), []&lt;typename T&gt;(T &amp;&amp;t) {
+			constexpr bool is_integral = std::is_integral_v&lt;std::remove_cvref_t&lt;T&gt;&gt;;
+			if constexpr (is_integral) {
+				return int(t) + 2;
+			} else {
+				return t;
+			}
+		});
+//结果{44,'c',14}
+</code></pre>
+<h1 id="tuple_cat">tuple_cat</h1>
+<p>作用是将多个 <code>Tuple</code>合并成一个。</p>
+<pre><code class="language-c++">namespace detail {
+
+template &lt;typename INDEX_SEQ&gt;
+struct make_tuple_from_fwd_tuple;
+
+template &lt;size_t... indices&gt;
+struct make_tuple_from_fwd_tuple&lt;std::index_sequence&lt;indices...&gt;&gt; {//基于 Tuple 创建一个新的 Tuple。
+	template &lt;typename FWD_TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd) {
+		return Tuple{get&lt;indices&gt;(std::forward&lt;FWD_TUPLE&gt;(fwd))...};
+	}
+};
+
+template &lt;typename FWD_INDEX_SEQ, typename TUPLE_INDEX_SEQ&gt;
+struct concat_with_fwd_tuple;
+
+template &lt;size_t... fwd_indices, size_t... indices&gt;//合并两个 Tuple
+struct concat_with_fwd_tuple&lt;std::index_sequence&lt;fwd_indices...&gt;, std::index_sequence&lt;indices...&gt;&gt; {
+	template &lt;typename FWD_TUPLE, typename TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd, TUPLE&amp;&amp; t) {
+		return forward_as_tuple(get&lt;fwd_indices&gt;(std::forward&lt;FWD_TUPLE&gt;(fwd))..., get&lt;indices&gt;(std::forward&lt;TUPLE&gt;(t))...);
+	}
+};
+
+struct tuple_cat_impl {
+	template &lt;typename FWD_TUPLE, typename TUPLE, typename... TUPLES&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd, TUPLE&amp;&amp; t, TUPLES&amp;&amp;... ts) {//进行递归
+		return f(concat_with_fwd_tuple&lt;
+		             std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;FWD_TUPLE&gt;&gt;&gt;,
+		             std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUPLE&gt;&gt;&gt;&gt;::f(std::forward&lt;FWD_TUPLE&gt;(fwd),
+		                                                                                    std::forward&lt;TUPLE&gt;(t)),
+		         std::forward&lt;TUPLES&gt;(ts)...);
+	}
+
+	template &lt;typename FWD_TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; ret) {//递归的 base case
+		return make_tuple_from_fwd_tuple&lt;std::make_index_sequence&lt;tuple_size_v&lt;FWD_TUPLE&gt;&gt;&gt;::f(
+		    std::forward&lt;FWD_TUPLE&gt;(ret));
+	}
+};
+
+}  // namespace detail
+
+template &lt;typename... TUPLES&gt;
+constexpr auto tuple_cat(TUPLES&amp;&amp;... tuples) {
+	return detail::tuple_cat_impl::f(std::forward&lt;TUPLES&gt;(tuples)...);
+}
+</code></pre>
+<p>实现的原理：</p>
+<ul>
+<li>还是利用递归的思路，创建了一个<code>FWD_TUPLE</code>，<code>FWD_TUPLE</code>的初始值是第一个<code>TUPLE</code>，然后使用<code>concat_with_fwd_tuple&lt;T,U&gt;::f(fwd,t)</code>函数将两个 <code>Tuple</code> 合并，这个函数的返回值是合并后的<code>Tuple</code>，不断地递归重复这种过程，直到遇见 base case，那就是只剩下一个<code>Tuple</code>地时候，这个时候就是所有<code>Tuple</code>合并完毕后的值。整个的逻辑过程，类似于合并多条链表，每次合并两条链表，然后将合并的结果，作为下一次的输入继续合并，直到完成所有的合并。</li>
+<li><code>tuple_cat_impl</code> 的两个 <code>f</code>函数是主要的逻辑，<code>make_tuple_from_fwd_tuple::f</code>和<code>concat_with_fwd_tuple::f</code>是辅助的函数。</li>
+</ul>
+<p>值得注意的地方：</p>
+<ul>
+<li>使用了之前实现的<code>forward_as_tuple</code>来创建 <code>Tuple</code>，保证了类型的不丢失。</li>
+<li>使用之前实现的<code>get&lt;indices&gt;()</code>和<code>tuple_size_v</code>来创建和和使用 paramter pack</li>
+</ul>
+<h1 id="filter">filter</h1>
+<pre><code class="language-c++">namespace detail {
+template &lt;typename TUP, size_t... indices&gt;
+constexpr auto cat_tuple_content(TUP&amp;&amp; t, std::index_sequence&lt;indices...&gt;) {
+	return tuple_cat(get&lt;indices&gt;(std::forward&lt;TUP&gt;(t))...);
+}
+}  // namespace detail
+
+template &lt;template &lt;typename...&gt; class PREDICATE, typename TUP&gt;
+constexpr auto filter(TUP&amp;&amp; tup) {
+	auto wrap_if_pred_matches = [&amp;]&lt;typename ELEM&gt;(ELEM&amp;&amp; e) {
+		if constexpr (PREDICATE&lt;std::remove_cvref_t&lt;ELEM&gt;&gt;::value) {
+			return forward_as_tuple(std::forward&lt;ELEM&gt;(e));
+		} else {
+			return Tuple&lt;&gt;{};
+		}
+	};
+	auto wrapped_tup = transform(std::forward&lt;TUP&gt;(tup), wrap_if_pred_matches);
+	// example: Tuple&lt;Tuple&lt;int&amp;&gt;, Tuple&lt;&gt;, Tuple&lt;unsigned&amp;&gt;, Tuple&lt;&gt;&gt;
+	return detail::cat_tuple_content(std::move(wrapped_tup),
+	                                 std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUP&gt;&gt;&gt;{});
+	// example: Tuple&lt;int, unsigned&gt;
+}
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>使用之前定义的 <code>transform</code>和<code>tuple_cat</code>,<code>transform</code>将不符合条件的设置为 <code>Tuple&lt;&gt;</code>，然后在合并的时候这部分就会被舍弃掉。</li>
+</ul>
+<h1 id="总结">总结</h1>
+<ul>
+<li>虽然自己之前对于Type Traits、CRTP等方法已经有多次使用，但是学习这个课程，还是让我让我收获了蛮多，期待之后将里面的知识融汇贯通了，进一步学习 std 标准库以及其他知名开源项目里面的源码。</li>
+<li>这次学习还有不完美的地方，比如自己实现的<code>Tuple</code>的相比于<code>std::tuple</code>会有多移动的情况，但是万事开头难，一口吃不成胖子，这次已经学习了很多的知识。已经取得了阶段性的成果，对于需要提高的地方之后继续学习，</li>
+</ul>
+<h1 id="参考资料">参考资料</h1>
+<ul>
+<li>包含所有代码的<a href="https://github.com/QBouts/BitsOfQ">Github 链接</a></li>
+<li>教程所在的<a href="https://www.youtube.com/playlist?list=PLWxziGKTUvQFIsbbFcTZz7jOT4TMGnZBh">Youtube 链接</a>，纯英文，声音有点儿小，不是流行的美语口音，但是发音不奇怪。</li>
+</ul>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#empty">empty</a></li>
+<li><a href="#front">front</a></li>
+<li><a href="#pop_front">pop_front</a></li>
+<li><a href="#back">back</a></li>
+<li><a href="#push-back">push back</a></li>
+<li><a href="#pop_back">pop_back</a></li>
+<li><a href="#at">at</a></li>
+<li><a href="#any">any</a></li>
+<li><a href="#contains_type">contains_type</a></li>
+<li><a href="#tuple_size">tuple_size</a></li>
+<li><a href="#tuple-%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84">Tuple 数据结构</a></li>
+<li><a href="#forward_as_tuple">forward_as_tuple</a></li>
+<li><a href="#get">get</a></li>
+<li><a href="#transfrom">transfrom</a></li>
+<li><a href="#tuple_cat">tuple_cat</a></li>
+<li><a href="#filter">filter</a></li>
+<li><a href="#%E6%80%BB%E7%BB%93">总结</a></li>
+<li><a href="#%E5%8F%82%E8%80%83%E8%B5%84%E6%96%99">参考资料</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/ru-he-shi-yong-vscode-diao-shi-da-xing-cpp-xiang-mu/">
+              <h3 class="post-title">
+                关于使用 VSCode 调试大型 Cpp 项目的一些实践
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

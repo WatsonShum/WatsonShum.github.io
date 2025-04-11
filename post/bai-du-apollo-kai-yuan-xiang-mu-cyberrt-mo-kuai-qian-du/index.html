@@ -1,0 +1,456 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CyberRT 事件系统源码阅读  | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="CyberRT 事件系统源码阅读  | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="原因
+自己两年之前也写过事件系统并记录成了Blog，当时刚做出来还觉得蛮有技术水平，但是现在看来，会发现其原理十分的简单，无非是利用了标准库提供的 std::function来包裹一个函数对象，然后储存到一个hashmap中，在有需要的时候..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              CyberRT 事件系统源码阅读 
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-04-07
+              </span>
+              <span>
+                12 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/bai-du-apollo-kai-yuan-xiang-mu-cyberrt-mo-kuai-qian-du.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="原因">原因</h1>
+<p>自己两年之前也写过事件系统并记录成了<a href="https://watsonshum.github.io/post/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong/">Blog</a>，当时刚做出来还觉得蛮有技术水平，但是现在看来，会发现其原理十分的简单，无非是利用了标准库提供的 <code>std::function</code>来包裹一个函数对象，然后储存到一个hashmap中，在有需要的时候进行调用。Apollo事件系统的基本原理也无非如此，只是进行了更多的封装。Apollo 采取了良好的分层设计，可以将整个事件系统分为底层的基础框架和上层的业务封装。下面也从这两个角度进行展开。</p>
+<h1 id="基础框架">基础框架</h1>
+<p>相关代码 <code>/cyber/base/signal.h</code>，这个文件里面实现了类似QT的 signal-slot 类似的机制，里面利用可变参数模板定义三个模板类，可变参数模板起到的作用都是一样的，代表的是对应函数的参数类型，下面进行详细分析。</p>
+<h2 id="slot">Slot</h2>
+<pre><code class="language-c++">template &lt;typename... Args&gt;
+class Slot {
+ public:
+  using Callback = std::function&lt;void(Args...)&gt;;
+  /*删掉一些不重要代码*/
+  void operator()(Args... args) {//重写操作符
+    if (connected_ &amp;&amp; cb_) {
+      cb_(args...);
+    }
+  }
+
+  void Disconnect() { connected_ = false; }
+  bool connected() const { return connected_; }
+
+ private:
+  Callback cb_;//储存的最终执行函数
+  bool connected_ = true;
+};
+</code></pre>
+<p>可以发现：</p>
+<ul>
+<li>本质上是对于<code>std::function&lt;void(Args...)&gt;</code>的一个封装，储存了事件系统中最后具体调用的函数。</li>
+<li>重写了<code>()</code>操作符，这样就可以通过类似<code>slot(p1,p2)</code>的方式来直接调用底层的函数，有一个小问题，这儿是可以使用perfect forwarding的，当时不知道为什么没有使用。</li>
+</ul>
+<h2 id="signal">Signal</h2>
+<pre><code class="language-c++">/*为了阅读，删除了一些不重要代码*/
+template &lt;typename... Args&gt;
+class Signal {
+ public:
+  using SlotPtr = std::shared_ptr&lt;Slot&lt;Args...&gt;&gt;;
+  using SlotList = std::list&lt;SlotPtr&gt;;
+  using ConnectionType = Connection&lt;Args...&gt;;
+  void operator()(Args... args) {
+    SlotList local;
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      for (auto&amp; slot : slots_) {
+        local.emplace_back(slot);
+      }
+    }
+
+    if (!local.empty()) {
+      for (auto&amp; slot : local) {
+        (*slot)(args...);
+      }
+    }
+
+    ClearDisconnectedSlots();
+  }
+  
+  ConnectionType Connect(const Callback&amp; cb) {
+    auto slot = std::make_shared&lt;Slot&lt;Args...&gt;&gt;(cb);
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      slots_.emplace_back(slot);
+    }
+
+    return ConnectionType(slot, this);
+  }
+
+  bool Disconnect(const ConnectionType&amp; conn) {
+    bool find = false;
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      for (auto&amp; slot : slots_) {
+        if (conn.HasSlot(slot)) {
+          find = true;
+          slot-&gt;Disconnect();
+        }
+      }
+    }
+
+    if (find) {
+      ClearDisconnectedSlots();
+    }
+    return find;
+  }
+  
+  void ClearDisconnectedSlots() {
+    std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+    slots_.erase(
+        std::remove_if(slots_.begin(), slots_.end(),
+                       [](const SlotPtr&amp; slot) { return !slot-&gt;connected(); }),
+        slots_.end());
+  }
+  SlotList slots_;
+  std::mutex mutex_;
+};
+</code></pre>
+<p>从代码中可以解读出以下信息：</p>
+<ul>
+<li>Signal代表的某类事件，这个事件是由里面可变长参数来定义的，对于的Slot也会随之确定。</li>
+<li>一个事件支持多个处理者，里面保存了一个list的 Slot，通过``Connect<code>和</code>Disconnect<code>函数来添加或者删除Slot。</code>Connect<code>函数会返回一个</code>Connection`，这个之后会探讨。</li>
+<li>在<code>ClearDisconnectedSlots</code>函数中使用了erase-remove idom，<code>std::remove_if</code>并不会删除元素，只是把符合条件的元素移动到末位并返回对应的迭代器，之后``erase`将所有末尾的元素删除，从而完成整个删除的过程。</li>
+<li>重写了<code>()</code>操作符，具体内容是调用所有的Slot。但是没有直接调用，而是先加锁复制一份，然后调用，这样避免了 Slot中又触发Signal，从而导致死锁的问题。</li>
+</ul>
+<h2 id="connection">Connection</h2>
+<p>Connection 相比于 Signal 和 Slot 是一个更加抽象的 OOP  概念，代表了两者之间的连接，实现的方式就是同时持有对应Slot和Signal的指针，有了Connection可以让整个语法更加简洁优雅，下面是一个例子。</p>
+<pre><code class="language-c++">// 创建信号和存储连接
+Signal&lt;int&gt; value_changed;
+auto callback = [](int new_value) { std::cout &lt;&lt; &quot;Value is now: &quot; &lt;&lt; new_value &lt;&lt; std::endl; };
+auto connection = ValueChanged.Connect(callback);
+
+// 使用连接对象检查状态并按需断开
+if (connection.IsConnected()) {
+    value_changed(42);  // 触发信号
+    connection.Disconnect();  // 断开连接
+}
+</code></pre>
+<p>如果不使用Connection这个类，那么相应的逻辑就需要写在 Signal里面，大致就是Signal提供一个函数，这个函数接受一个参数来找到对应的 Slot，然后进行各种操作。使用Connection将这个逻辑独立出来从设计上更加符合单一职责原则。</p>
+<h1 id="业务封装">业务封装</h1>
+<p>前面的Slot、Signal以及Connection都是通用的，理论上任何系统都可以使用，接下来Apollo基于这些组件，在上面进一步操作，实现了更针对自动驾驶的事件系统。第一个操作就是固化，将事件类型参数固定为两个部分，``MessageT<code>和</code>MessageInfo`。第二个操作是扩展，在上面封装出更多的逻辑。</p>
+<h2 id="listenerhandler">ListenerHandler</h2>
+<p>前面<code>Signal</code>使用可变模版参数，理论上可以接受任意类型的参数，<code>ListenerHandler</code>可以看作对于<code>Signal</code>的一种特化，只接受两个参数``std::shared_ptr<Message><code>和 </code>MessageInfo`。</p>
+<pre><code class="language-c++">template &lt;typename MessageT&gt;
+class ListenerHandler : public ListenerHandlerBase {
+ public:
+  using Message = std::shared_ptr&lt;MessageT&gt;;
+  using MessageSignal = base::Signal&lt;const Message&amp;, const MessageInfo&amp;&gt;;
+
+  using Listener = std::function&lt;void(const Message&amp;, const MessageInfo&amp;)&gt;;
+  using MessageConnection =base::Connection&lt;const Message&amp;, const MessageInfo&amp;&gt;;
+  using ConnectionMap = std::unordered_map&lt;uint64_t, MessageConnection&gt;;
+
+  ListenerHandler() {}
+  virtual ~ListenerHandler() {}
+
+  void Connect(uint64_t self_id, const Listener&amp; listener);
+  void Connect(uint64_t self_id, uint64_t oppo_id, const Listener&amp; listener);
+
+  void Disconnect(uint64_t self_id) override;
+  void Disconnect(uint64_t self_id, uint64_t oppo_id) override;
+
+  void Run(const Message&amp; msg, const MessageInfo&amp; msg_info);
+  void RunFromString(const std::string&amp; str,const MessageInfo&amp; msg_info) override;
+
+ private:
+  using SignalPtr = std::shared_ptr&lt;MessageSignal&gt;;
+  using MessageSignalMap = std::unordered_map&lt;uint64_t, SignalPtr&gt;;
+  // used for self_id
+  MessageSignal signal_;
+  ConnectionMap signal_conns_;  // key: self_id
+
+  // used for self_id and oppo_id
+  MessageSignalMap signals_;  // key: oppo_id
+  // key: oppo_id
+  std::unordered_map&lt;uint64_t, ConnectionMap&gt; signals_conns_;
+
+  base::AtomicRWLock rw_lock_;
+};
+</code></pre>
+<p>可以看到<code>ListenerHandler</code>和``Signal<code>的参数接口都差不多，都是</code>Connect<code>与 </code>Disconnect<code>，然后</code>Run<code>函数对应</code>Signal<code>重写的 </code>()<code>操作符，但是能接受的参数却被固定为了两个，第一个参数是模板，第二个必须是</code>MessageInfo`，很明显这是针对自动驾驶消息传递进行的一种特化。但是在这个特化的基础上又加入了新的逻辑：</p>
+<ul>
+<li>
+<p>加入一个鉴权机制，就是在<code>Connect</code>的时候传入发送者的``id<code>并通过哈希表储存，在执行</code>Run()<code>函数的时候会通过</code>MessageInfo<code>的</code>sender_id_`字段来查询，只有在哈希表中存在才能够执行。也就是说可以选择只处理特定发送者的消息。</p>
+</li>
+<li>
+<p><code>RunFromString</code>如果消息本身是以文本的形式传过来的，就先反序列化然后调用<code>Run()</code>。</p>
+</li>
+</ul>
+<h2 id="messageinfo">MessageInfo</h2>
+<pre><code class="language-c++">/*删除了多余的不重要代码*/
+class MessageInfo {
+ public:
+  bool SerializeTo(std::string* dst) const;
+  bool SerializeTo(char* dst, std::size_t len) const;
+  bool DeserializeFrom(const std::string&amp; src);
+  bool DeserializeFrom(const char* src, std::size_t len);
+
+ private:
+  Identity sender_id_;
+  uint64_t channel_id_ = 0;
+  uint64_t seq_num_ = 0;
+  Identity spare_id_;
+  uint64_t send_time_;
+};
+</code></pre>
+<p>Apollo创建了MessageInfo 这个类，用来记录每一条消息的相关信息：</p>
+<ul>
+<li>
+<p><code>sender_id_</code>用来记录消息的发送者，<code>Identity</code>本质上存储了两个变量，第一个是调用系统<code>uuid_generate</code>生成的<code>uuid_t</code>，第二个变量是基于uuid 使用``std::hash`生成的一个uint64_t。前者用来比较Identity是否相同，后者用作id。</p>
+</li>
+<li>
+<p><code>channel_id_</code>是根据通道名称hash生成的一个<code>uint64_t</code>，具体实现函数是<code>uint64_t GlobalData::RegisterChannel(const std::string&amp; channel)</code>。也是使用``std::hash`来产生一个唯一值。</p>
+</li>
+<li>
+<p><code>seq_num_</code>是递增的，用来判断是否有丢帧或者帧重复，在发送的时候递增，具体函数在:</p>
+<pre><code class="language-c++">template &lt;typename M&gt;
+bool Transmitter&lt;M&gt;::Transmit(const MessagePtr&amp; msg) {
+  msg_info_.set_seq_num(NextSeqNum());//递增 seq_num
+  msg_info_.set_send_time(Time::Now().ToNanosecond());
+  PerfEventCache::Instance()-&gt;AddTransportEvent(
+      TransPerf::TRANSMIT_BEGIN, attr_.channel_id(), msg_info_.seq_num());
+  return Transmit(msg, msg_info_);
+}
+</code></pre>
+</li>
+<li>
+<p><code>spare_id_</code>就是备用的</p>
+</li>
+<li>
+<p><code>send_time_</code>在<code>seq_num_</code>的代码中已经提到</p>
+</li>
+</ul>
+<p>总的来说<code>MessageInfo</code>是关于Message的信息，自己本身不携带Message，但是和具体Message一起发送。</p>
+<h2 id="dispatcher">Dispatcher</h2>
+<p><code>ListenerHandler</code>解决了一种消息的处理，但是自动驾驶不止一种消息类型，为了管理多种消息以及相应的事件，需要一个更加综合的类，所以又创建了Dispatcher。</p>
+<pre><code class="language-c++">class Dispatcher {
+ public:
+  Dispatcher();
+  virtual ~Dispatcher();
+
+  virtual void Shutdown();
+
+  template &lt;typename MessageT&gt;
+  void AddListener(const RoleAttributes&amp; self_attr,
+                   const MessageListener&lt;MessageT&gt;&amp; listener);
+
+  template &lt;typename MessageT&gt;
+  void AddListener(const RoleAttributes&amp; self_attr,
+                   const RoleAttributes&amp; opposite_attr,
+                   const MessageListener&lt;MessageT&gt;&amp; listener);
+
+  template &lt;typename MessageT&gt;
+  void RemoveListener(const RoleAttributes&amp; self_attr);
+
+  template &lt;typename MessageT&gt;
+  void RemoveListener(const RoleAttributes&amp; self_attr,
+                      const RoleAttributes&amp; opposite_attr);
+
+  bool HasChannel(uint64_t channel_id);
+
+ protected:
+  std::atomic&lt;bool&gt; is_shutdown_;
+  // key: channel_id of message
+  AtomicHashMap&lt;uint64_t, ListenerHandlerBasePtr&gt; msg_listeners_;
+  base::AtomicRWLock rw_lock_;
+};
+</code></pre>
+<p>可以看到<code>Dispatcher</code>的核心数据结构就是关于<code>ListenerHandler</code>的一个哈希表：</p>
+<ul>
+<li>key是channel_id。channel_id之前提到过，是根据channel_name 生成的一个哈希值，这样设计是合理的，比如有一个channel叫做<code>/lidar</code>，那么它定义的消息类型也是确定的，同时对应的处理这个消息类型的函数参数类型也就是确定的。所以的确是一一对应的关系。</li>
+<li>键值是<code>ListenerHandlerBasePtr</code>，存储的是基类的指针，利用了多态。</li>
+</ul>
+<p>从这儿回头看，可以发现本质还是和简单的事件系统类似，就是使用数据结构将std::function存储了起来，然后在有需要的时候调用。但是对于这种过程中的每一个细节进行了细致的抽象，比如创建了<code>Connection</code>，<code>Signal</code>等概念，同时针对自动驾驶的场景进行了特化以及添加了新的逻辑。</p>
+<h2 id="transmitter-receiver">Transmitter &amp;&amp; Receiver</h2>
+<p>后面的<code>Transmitter</code>和<code>Receiver</code>从本质上就好理解了，</p>
+<ul>
+<li><code>Tansmitter</code>相当于就是Sender只是换了一个名称，它的<code>Transmit</code>函数就是在底层调用了<code>Dispatcher</code>的单例，获取了对应的<code>ListenerHandler</code>，然后调用了<code>Run()</code>函数。</li>
+<li><code>Receiver</code>就是自己的某一个类成员函数被添加到了<code>Dispatcher</code>中，然后会被调用。</li>
+</ul>
+<p>当然以上都是本质上理解，实际情况会复杂很多：</p>
+<ul>
+<li>比如<code>Receiver</code>的成员函数没有被直接执行，而是会被调度器调度，调度器又有不同的类型。为了减少 Context Switch的成本还用到了协程。</li>
+<li>函数也不是直接使用MessageT，会使用多个通道的数据，这其中又涉及到DataFusion以及数据的缓存。</li>
+<li><code>Dispather</code>也不是拿来直接用，而是作为一个基类，基于不同的通讯方式创建了三个子类 <code>IntraDispatcher</code>、<code>RtpsDispatcher</code>、<code>ShmDispatcher</code>。这些子类又有对应的<code>Receiver</code>和<code>Transmitter</code>。</li>
+<li>注册处理函数的逻辑也很复杂，从<code>Component</code>到<code>Node</code>到 <code>Reader</code>到<code>Receriver</code>，函数对象又经过了多层传递。</li>
+</ul>
+<p>不过整个框架是明了的，起码现在已经能够达至理解为什么某个通道的<code>Writer</code>发送一个信息，订阅了同一个channel的 <code>Reader</code>就能够响应了。</p>
+<h1 id="总结">总结</h1>
+<p>这次阅读代码自己有两个方向的收获：</p>
+<ol>
+<li>自己对于如何实现一个事件系统有了更深的理解</li>
+<li>对于 CyberRT的底层框架有了认知，知道了大致工作原理，这块内容是一个比较中枢的内容， 一方面也为之后阅读调度系统等更后面的机制打下了基础，另一方面也为阅读更前面的信息产生机制有帮助。</li>
+</ol>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E5%8E%9F%E5%9B%A0">原因</a></li>
+<li><a href="#%E5%9F%BA%E7%A1%80%E6%A1%86%E6%9E%B6">基础框架</a>
+<ul>
+<li><a href="#slot">Slot</a></li>
+<li><a href="#signal">Signal</a></li>
+<li><a href="#connection">Connection</a></li>
+</ul>
+</li>
+<li><a href="#%E4%B8%9A%E5%8A%A1%E5%B0%81%E8%A3%85">业务封装</a>
+<ul>
+<li><a href="#listenerhandler">ListenerHandler</a></li>
+<li><a href="#messageinfo">MessageInfo</a></li>
+<li><a href="#dispatcher">Dispatcher</a></li>
+<li><a href="#transmitter-receiver">Transmitter &amp;&amp; Receiver</a></li>
+</ul>
+</li>
+<li><a href="#%E6%80%BB%E7%BB%93">总结</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/cpp-conf-xue-xi/">
+              <h3 class="post-title">
+                CppConf：How Linux Elf Symbols Work学习
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

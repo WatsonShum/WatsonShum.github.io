@@ -1,0 +1,173 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>用代码写简历记录 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="用代码写简历记录 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="之前自己找工作时一直是使用其他工具写简历，这次自己因为一些原因又要开始找工作了，于是想能不能自己使用 React 写一个简历呢。为什么要用网页技术写简历，我觉得有以下的好处：
+
+可以使用Git 进行版本控制，可以清楚的追溯修改的历史。再也不..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              用代码写简历记录
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-05-22
+              </span>
+              <span>
+                2 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/yong-dai-ma-xie-yi-ge-jian-li.jpg" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>之前自己找工作时一直是使用其他工具写简历，这次自己因为一些原因又要开始找工作了，于是想能不能自己使用 React 写一个简历呢。为什么要用网页技术写简历，我觉得有以下的好处：</p>
+<ul>
+<li>可以使用Git 进行版本控制，可以清楚的追溯修改的历史。再也不用维护几十份历史简历文件了。</li>
+<li>针对不同岗位可以创建不同的分支，方便管理，比如针对岗位 A 我可以专门创建一个分支来突出自己的优势，当我学会一个新的技能可以更新到简历上面的时候，我可以将其快速 merge到其他分支。</li>
+<li>使用代码可以对简历样式实现更加精确的控制，可以实现像素级别的精度，如果使用其他排版工具，需要自己手动拖拽。</li>
+<li>可以实现一些动态逻辑，比如一键切换中英文版本，这样在一定程度上也可以减少维护两份简历的压力。</li>
+<li>可以直接通过网页向外呈现，由于这个本来就是网页应用，是一个 static page，所以可以直接通过 github pages 等工具部署上去，之后还可以与我的博客、社交工具联动。</li>
+</ul>
+<p>想到以上的好处，自己决定捡起之前荒废已久的 React ，找了一个脚手架就开干了。说实话比较简单，因为只是做一个静态网站。最终经过一百多次提交后，实现了以上的目标。</p>
+<h1 id="todo">TODO</h1>
+<p>信息脱敏后展示源码</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#todo">TODO</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

@@ -1,0 +1,2594 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://WatsonShum.github.io</id>
+    <title>Watson&apos;s Blog</title>
+    <updated>2025-04-11T02:35:19.938Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://WatsonShum.github.io"/>
+    <link rel="self" href="https://WatsonShum.github.io/atom.xml"/>
+    <subtitle>技术博客</subtitle>
+    <logo>https://WatsonShum.github.io/images/avatar.png</logo>
+    <icon>https://WatsonShum.github.io/favicon.ico</icon>
+    <rights>All rights reserved 2025, Watson&apos;s Blog</rights>
+    <entry>
+        <title type="html"><![CDATA[CyberRT 插件机制源码阅读]]></title>
+        <id>https://WatsonShum.github.io/post/cyberrt-cha-jian-ji-zhi-xue-xi/</id>
+        <link href="https://WatsonShum.github.io/post/cyberrt-cha-jian-ji-zhi-xue-xi/">
+        </link>
+        <updated>2025-04-10T23:34:59.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="原因">原因</h1>
+<p>Apollo实现了一个插件系统，其他模块例如 Planning、Perception 没有直接静态编译集成到主程序中，而是单独编译成一个动态库，CyberRT 动态加载这些模块，本质上就是一个插件系统。</p>
+<p>自己之前也写过插件系统，并将整个过程总结成了<a href="https://watsonshum.github.io/post/cpp-shi-xian-yi-ge-cha-jian-xi-tong/">Blog</a>,说到底原理也比较简单，就是利用了动态库的符号，关于符号我也进行了专门的学习并总结成了<a href="https://watsonshum.github.io/post/cpp-conf-xue-xi/">Blog</a>,利用符号不仅 C++ 可以调用 C++ 的代码，其他语言也都可以调用 C++ 的代码，Apollo 插件系统的底层实现原理也是一样的，只是在工程上做了更精细的 OOP 封装以及添加了更多其他的逻辑，Apollo 的代码分层得很好，将插件机制单独抽离了出来，然后使用这个机制完成业务逻辑，所以接下来也是分两个层次来阅读代码，第一部分是基础机制，第二部分是业务应用。</p>
+<h1 id="基础机制">基础机制</h1>
+<p>在代码库中与插件系统相关的主要有以下几个类：</p>
+<ul>
+<li><code>SharedLibrary</code></li>
+<li><code>ClassFactory</code></li>
+<li><code>ClassLoader</code></li>
+<li><code>ClassLoaderManager</code></li>
+</ul>
+<p>除此之外还有一些函数，下面进行详细介绍。</p>
+<h2 id="sharedlibrary">SharedLibrary</h2>
+<p>这个类表示一个动态库，对打开动态库获取符号等常用操作进行了一些封装：</p>
+<ul>
+<li><code>Load(const std::string&amp; path, int flags)</code>，根据文件路径使用<code>dlopen</code>加载动态库</li>
+<li><code>GetSymbol(const std::string&amp; name) </code>，使用<code>dlsym</code>获取符号</li>
+<li><code>Unload()</code>使用<code>dlclose</code>卸载动态库</li>
+</ul>
+<h2 id="插件自动注册机制">插件自动注册机制</h2>
+<p>对于插件加载，最直观的思路是调用动态库的Text Symbol 获得一个函数，然后调用这个函数返回一个类的实例，这个的思路是主体程序去加载插件，Apollo使用了另外的一种思路，插件会自动注册到主体程序中，核心代码是这一个宏：</p>
+<pre><code class="language-c++">#define CLASS_LOADER_REGISTER_CLASS_INTERNAL(Derived, Base, UniqueID)     \
+  namespace {                                                             \
+  struct ProxyType##UniqueID {                                            \
+    ProxyType##UniqueID() {                                               \
+      apollo::cyber::class_loader::utility::RegisterClass&lt;Derived, Base&gt;( \
+          #Derived, #Base);                                               \
+    }                                                                     \
+  };                                                                      \
+  static ProxyType##UniqueID g_register_class_##UniqueID;                 \
+  }
+
+#define CLASS_LOADER_REGISTER_CLASS_INTERNAL_1(Derived, Base, UniqueID) \
+  CLASS_LOADER_REGISTER_CLASS_INTERNAL(Derived, Base, UniqueID)
+
+// register class macro
+#define CLASS_LOADER_REGISTER_CLASS(Derived, Base) \
+  CLASS_LOADER_REGISTER_CLASS_INTERNAL_1(Derived, Base, __COUNTER__)
+
+#endif  // CYBER_CLASS_LOADER_CLASS_LOADER_REGISTER_MACRO_H_
+</code></pre>
+<p>插件只需要在自己的代码中使用这一段宏，就能够在使用<code>dlopen</code>的时候自动地注册到主体程序中，其实现原理如下：</p>
+<ul>
+<li>定义了一个struct，然后在这个struct的构造函数中调用了<code>RegisterClass&lt;Derived, Base&gt;(DerivedName,BaseName)</code>，然后在匿名空间中创建了对应struct的静态变量，由于静态变量会在最开始初始化，初始化的时候会自动调用构造函数，所以在<code>dlopen</code>的时候就能够自动调用注册函数，从而注册到主程序中。</li>
+<li>主体程序的相关符号的可见效设置成visibility，插件就可以找到对应的符号。在加载插件的时候<code>dlopen</code>使用<code>RTLD_GLOBAL</code>标志，插件就能访问主程序中已经加载的符号，所以也就能成功调用 <code>RegisterClass</code>函数。</li>
+<li>使用<code>__COUNTER__</code>来拼接类的名称，实现了类名称的唯一性，这样在同一个源文件里面也可以多次使用这个宏，不会导致符号冲突。</li>
+</ul>
+<h2 id="工厂机制创建插件实例">工厂机制创建插件实例</h2>
+<p>上面可以看到插件会自动调用<code>RegisterClass</code>函数注册到主体程序，接下来分析一下主体程序如何具体实例化插件的，采用的核心数据结构是一个嵌套哈希表。</p>
+<pre><code class="language-c++">using ClassClassFactoryMap =std::map&lt;std::string, utility::AbstractClassFactoryBase*&gt;;
+using BaseToClassFactoryMapMap = std::map&lt;std::string, ClassClassFactoryMap&gt;;
+</code></pre>
+<pre><code>BaseToClassFactoryMapMap
+│
+├── &quot;BaseA&quot; → ClassClassFactoryMap
+│       ├── &quot;DerivedA1&quot; → ClassFactory&lt;A1, BaseA&gt;
+│       └── &quot;DerivedA2&quot; → ClassFactory&lt;A2, BaseA&gt;
+└── &quot;BaseB&quot; → ClassClassFactoryMap
+        └── &quot;DerivedB1&quot; → ClassFactory&lt;B1, BaseB&gt;
+</code></pre>
+<p>这个哈希表最外层的键是<code>typeid(Base).name()</code>，里层的Key是<code>class_name</code>，里层的值是 ClassFactory 对象。有一个值得注意的细节是最外层的没有直接使用<code>base_class_name</code>，这是因为如果多个动态库都定义相同名称的Base Class，那么加载的时候就会冲突，但是如果使用<code>typeid(Base).name()</code>借助Name Mangling就可以解决这个问题。针对这个哈希表主要有两种操作，</p>
+<ol>
+<li>
+<p>通过<code>RegisterClass</code>函数往哈希表加元素</p>
+<pre><code class="language-c++">template &lt;typename Derived, typename Base&gt;
+void RegisterClass(const std::string&amp; class_name,
+                   const std::string&amp; base_class_name) {
+  utility::AbstractClassFactory&lt;Base&gt;* new_class_factory_obj =
+      new utility::ClassFactory&lt;Derived, Base&gt;(class_name, base_class_name);
+  new_class_factory_obj-&gt;AddOwnedClassLoader(GetCurActiveClassLoader());
+  new_class_factory_obj-&gt;SetRelativeLibraryPath(GetCurLoadingLibraryName());
+
+  GetClassFactoryMapMapMutex().lock();
+  ClassClassFactoryMap&amp; factory_map =
+      GetClassFactoryMapByBaseClass(typeid(Base).name());
+  factory_map[class_name] = new_class_factory_obj;
+  GetClassFactoryMapMapMutex().unlock();
+}
+</code></pre>
+<p>可以看到这个函数做的主要工作就有两个：</p>
+<ol>
+<li>根据Base和Derived的类型创建一个Class Factory对象，这里使用了工厂模式，之后能够使用这个工厂来</li>
+<li>将这个对象储存在一个嵌套哈希表中。</li>
+</ol>
+</li>
+<li>
+<p>通过<code>CreateClassObj</code>访问嵌套哈希表调用工厂创建相应的实例：</p>
+<pre><code class="language-c++">template &lt;typename Base&gt;
+Base* CreateClassObj(const std::string&amp; class_name, ClassLoader* loader) {
+  GetClassFactoryMapMapMutex().lock();
+  ClassClassFactoryMap&amp; factoryMap = GetClassFactoryMapByBaseClass(typeid(Base).name());//根据base类型获取里层哈希表
+  AbstractClassFactory&lt;Base&gt;* factory = nullptr;
+  if (factoryMap.find(class_name) != factoryMap.end()) {
+    factory = dynamic_cast&lt;utility::AbstractClassFactory&lt;Base&gt;*&gt;(//找到对应的工厂
+        factoryMap[class_name]);
+  }
+  GetClassFactoryMapMapMutex().unlock();
+
+  Base* classobj = nullptr;
+  if (factory &amp;&amp; factory-&gt;IsOwnedBy(loader)) {
+    classobj = factory-&gt;CreateObj();//调用工厂创建相应的实例
+  }
+  return classobj;
+}
+</code></pre>
+</li>
+</ol>
+<p>有一点儿小细节想探讨一下，可以看到上面函数中一些变量都是通过函数获取的，比如<code>GetClassFactoryMapMapMutex()</code>,如果去看它的定义会发现十分简单：</p>
+<pre><code class="language-c++">BaseToClassFactoryMapMap&amp; GetClassFactoryMapMap() {
+  static BaseToClassFactoryMapMap instance;
+  return instance;
+}
+</code></pre>
+<p>理论上即使使用一个全局变量也可以达到相似的效果，为什么要多此一举呢，这样写的好处是可以解决全局变量初始化顺序的问题。如果<code>a</code>变量引用了<code>b</code>变量，可能<code>b</code>这时候还没有初始化，那么就会报错。但是通过上面的函数方式来获取，就相当于实现了懒加载。但是反而保证了这个变量被调用时肯定是可用的。单例模式也是这种写法， Apollo在这儿也利用了这种懒加载的方法，<code>class_loader_utility.h</code>里面的变量基本上都通过这种方法进行了封装。</p>
+<h2 id="工厂类">工厂类</h2>
+<p>上面提到了Class Factory，只提到了如何使用，下面看一下具体定义的核心代码</p>
+<pre><code class="language-C++">template &lt;typename Base&gt;
+class AbstractClassFactory : public AbstractClassFactoryBase {
+ public:
+  AbstractClassFactory(const std::string&amp; class_name,
+                       const std::string&amp; base_class_name)
+      : AbstractClassFactoryBase(class_name, base_class_name) {}
+
+  virtual Base* CreateObj() const = 0;
+
+ private:
+  AbstractClassFactory();
+  AbstractClassFactory(const AbstractClassFactory&amp;);
+  AbstractClassFactory&amp; operator=(const AbstractClassFactory&amp;);
+};
+
+template &lt;typename ClassObject, typename Base&gt;
+class ClassFactory : public AbstractClassFactory&lt;Base&gt; {
+ public:
+  ClassFactory(const std::string&amp; class_name,
+               const std::string&amp; base_class_name)
+      : AbstractClassFactory&lt;Base&gt;(class_name, base_class_name) {}
+
+  Base* CreateObj() const { return new ClassObject; }
+};
+</code></pre>
+<p>算上template class 里面一共涉及了三个class</p>
+<ul>
+<li><code>AbstractClassFactoryBase</code>一个作用就是作为指针指向子类，被放到一个数据结构中，然后能够实现多态。</li>
+<li><code>template &lt;typename Base&gt; class AbstractClassFactory</code>作用是一样的，也是为了实现多态，相比于上者多了一个<code>CreateObj</code>函数。</li>
+<li><code>template &lt;typename ClassObject, typename Base&gt; class ClassFactory</code>真正的实现，实际上利用多态调用的是这一层的函数。</li>
+</ul>
+<p>嵌套哈希表中储存的是<code>AbstractClassFactoryBase</code>指针，所以在<code>CreateClassObj</code>函数中调用时还需要根据传进来的模板参数进行<code>dynami_cast</code>然后才能使用。</p>
+<h2 id="插件实例的生命周期管理">插件实例的生命周期管理</h2>
+<p><code>ClassFactory</code>返回的是一个裸指针，一般来说为了内存安全都会使用一个数据结构将这个裸指针存起来，在适当的时候再调用对应的析构函数。但是Apollo采取了一个更加优雅的解决方案。定义了<code>ClassLoader</code>来更加智能的追踪和管理创建出来的插件实例。它主要做了三件事情：</p>
+<ol>
+<li>
+<p>创建出来的裸指针用<code>std::shared_ptr</code>包裹，自定义了删除器函数<code>ClassLoader::OnClassObjDeleter&lt;Base&gt;</code></p>
+<pre><code class="language-c++">template &lt;typename Base&gt;
+std::shared_ptr&lt;Base&gt; ClassLoader::CreateClassObj(
+    const std::string&amp; class_name) {
+  if (!IsLibraryLoaded()) {
+    LoadLibrary();
+  }
+
+  Base* class_object = utility::CreateClassObj&lt;Base&gt;(class_name, this);
+  if (class_object == nullptr) {
+    AWARN &lt;&lt; &quot;CreateClassObj failed, ensure class has been registered. &quot;
+          &lt;&lt; &quot;classname: &quot; &lt;&lt; class_name &lt;&lt; &quot;,lib: &quot; &lt;&lt; GetLibraryPath();
+    return std::shared_ptr&lt;Base&gt;();
+  }
+
+  std::lock_guard&lt;std::mutex&gt; lck(classobj_ref_count_mutex_);
+  classobj_ref_count_ = classobj_ref_count_ + 1;
+  std::shared_ptr&lt;Base&gt; classObjSharePtr(
+      class_object, std::bind(&amp;ClassLoader::OnClassObjDeleter&lt;Base&gt;, this,
+                              std::placeholders::_1));
+  return classObjSharePtr;
+}
+
+template &lt;typename Base&gt;
+void ClassLoader::OnClassObjDeleter(Base* obj) {
+  if (nullptr == obj) {
+    return;
+  }
+  delete obj;
+  std::lock_guard&lt;std::mutex&gt; lck(classobj_ref_count_mutex_);
+  --classobj_ref_count_;
+}
+</code></pre>
+</li>
+<li>
+<p>维护了<code>classobj_ref_count_</code>变量和 <code>loadlib_ref_count_</code>变量，分别用来跟踪现存的插件实例数量和动态库加载次数。采取了类似引用技术的机制，在创建类实例的时候增加<code>classobj_ref_count_</code>，在自定的删除器中减少<code>classobj_ref_count_</code>。当所有插件实例都销毁后<code>classobj_ref_count_</code>就能够变为0，就可以安全地卸载这个动态库。</p>
+<pre><code class="language-c++">int ClassLoader::UnloadLibrary() {
+  std::lock_guard&lt;std::mutex&gt; lckLib(loadlib_ref_count_mutex_);
+  std::lock_guard&lt;std::mutex&gt; lckObj(classobj_ref_count_mutex_);
+
+  if (classobj_ref_count_ &gt; 0) {
+    AINFO &lt;&lt; &quot;There are still classobjs have not been deleted, &quot;
+             &quot;classobj_ref_count_: &quot;
+          &lt;&lt; classobj_ref_count_;
+  } else {
+    --loadlib_ref_count_;
+    if (loadlib_ref_count_ == 0) {//检查加载的所有实例都已经销毁
+      utility::UnloadLibrary(library_path_, this);
+    } else {
+      if (loadlib_ref_count_ &lt; 0) {
+        loadlib_ref_count_ = 0;
+      }
+    }
+  }
+  return loadlib_ref_count_;
+}
+</code></pre>
+</li>
+</ol>
+<h2 id="classloadermanager">ClassLoaderManager</h2>
+<p><code>ClassLoader</code>针对的是一个动态库，如果有多个插件，也需要管理，所以又封装了一个<code>ClassLoaderManager</code>来管理，其核心的数据结构就是<code>std::map&lt;std::string, ClassLoader*&gt; libpath_loader_map_;</code>，相当于将一个动态库的路径和一个ClassLoader对应起来，这样用来管理所有插件相关的动态库。有一个疑问是为什么不使用<code>std::unordered_map</code>，好像也没有有序性的要求，但是这个细节不影响整体理解。</p>
+<h1 id="业务应用">业务应用</h1>
+<p>上面分析了整个插件系统的基础机制，下面是和CyberRT核心概念结合更加紧密的应用。我们可以从两个方向来探讨，第一个是插件端，第二个是主体程序。由于是应用，比较简单。</p>
+<h2 id="插件端">插件端</h2>
+<p>在CyberRT中每一个Component就是一个插件，所以在<code>component.h</code>中对于<code>CLASS_LOADER_REGISTER_CLASS</code>进行了进一步的封装：</p>
+<pre><code class="language-C++">#define CYBER_REGISTER_COMPONENT(name) \
+  CLASS_LOADER_REGISTER_CLASS(name, apollo::cyber::ComponentBase)
+</code></pre>
+<p>将Base 固化为了<code>apollo::cyber::ComponentBase</code>，然后这个宏就在所有的Component中使用，将Component作为插件加载到CyberRT系统中，比如：</p>
+<ul>
+<li>在<code>monitor.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(Monitor)</code></li>
+<li>在<code>lidar_driver_component.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(LidarDriverComponent)</code></li>
+<li>在<code>pointcloud_preprocess_component.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(PointCloudPreprocessComponent);</code></li>
+</ul>
+<h2 id="主体程序">主体程序</h2>
+<p>在<code>ModuleController</code>中有一个<code>ClassLoaderManager class_loader_manager_</code>成员变量，在之后的<code>LoadModule</code>使用这个变量加载Component。这个<code>ModuleController::LoadModule</code>会在函数程序初始化地时候被调用。</p>
+<pre><code class="language-c++">/**删除了无关代码*/
+bool ModuleController::LoadModule(const DagConfig&amp; dag_config) {
+  for (auto module_config : dag_config.module_config()) {
+    std::string load_path;
+    if (!common::GetFilePathWithEnv(module_config.module_library(),
+                                    &quot;APOLLO_LIB_PATH&quot;, &amp;load_path)) {
+      AERROR &lt;&lt; &quot;no module library [&quot; &lt;&lt; module_config.module_library()
+             &lt;&lt; &quot;] found!&quot;;
+      return false;
+    }
+    AINFO &lt;&lt; &quot;mainboard: use module library &quot; &lt;&lt; load_path;
+
+    class_loader_manager_.LoadLibrary(load_path);
+
+    for (auto&amp; component : module_config.components()) {
+      const std::string&amp; class_name = component.class_name();
+      std::shared_ptr&lt;ComponentBase&gt; base =
+          class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name);
+      if (base == nullptr || !base-&gt;Initialize(component.config())) {
+        return false;
+      }
+      component_list_.emplace_back(std::move(base));
+    }
+
+    for (auto&amp; component : module_config.timer_components()) {
+      const std::string&amp; class_name = component.class_name();
+      std::shared_ptr&lt;ComponentBase&gt; base =
+          class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name);
+      if (base == nullptr || !base-&gt;Initialize(component.config())) {
+        return false;
+      }
+      component_list_.emplace_back(std::move(base));
+    }
+  }
+  return true;
+</code></pre>
+<p>可以看到两类Component都是使用<code>class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name)</code>加载的。当然会有一些解析配置文件的前置工作，不过那不是核心逻辑。</p>
+<h1 id="小结">小结</h1>
+<p>虽然自己之前也做过插件系统，有一些经验，但是这次阅读还是有很多让我印象深刻的技术点，主要是三个：</p>
+<ul>
+<li>插件的自动注册机制</li>
+<li>使用工厂来自动创建插件实例</li>
+<li>对于插件实例生命周期的追踪和管理</li>
+</ul>
+<p>这三个功能的实现都是建立在C++语言机制的熟练应用基础上的，体现出了开发者优秀的技术水平，</p>
+<p>此外分层合理，将基础功能与上层应用分得很开。基础功能可以直接拷贝然后应用到其他项目中，对于 OOP 的建模十分地精细。除此之外还涉及到了许多编译的知识，不得不说整个框架设计得很好。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[CyberRT 事件系统源码阅读 ]]></title>
+        <id>https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-cyberrt-mo-kuai-qian-du/</id>
+        <link href="https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-cyberrt-mo-kuai-qian-du/">
+        </link>
+        <updated>2025-04-07T00:50:31.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="原因">原因</h1>
+<p>自己两年之前也写过事件系统并记录成了<a href="https://watsonshum.github.io/post/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong/">Blog</a>，当时刚做出来还觉得蛮有技术水平，但是现在看来，会发现其原理十分的简单，无非是利用了标准库提供的 <code>std::function</code>来包裹一个函数对象，然后储存到一个hashmap中，在有需要的时候进行调用。Apollo事件系统的基本原理也无非如此，只是进行了更多的封装。Apollo 采取了良好的分层设计，可以将整个事件系统分为底层的基础框架和上层的业务封装。下面也从这两个角度进行展开。</p>
+<h1 id="基础框架">基础框架</h1>
+<p>相关代码 <code>/cyber/base/signal.h</code>，这个文件里面实现了类似QT的 signal-slot 类似的机制，里面利用可变参数模板定义三个模板类，可变参数模板起到的作用都是一样的，代表的是对应函数的参数类型，下面进行详细分析。</p>
+<h2 id="slot">Slot</h2>
+<pre><code class="language-c++">template &lt;typename... Args&gt;
+class Slot {
+ public:
+  using Callback = std::function&lt;void(Args...)&gt;;
+  /*删掉一些不重要代码*/
+  void operator()(Args... args) {//重写操作符
+    if (connected_ &amp;&amp; cb_) {
+      cb_(args...);
+    }
+  }
+
+  void Disconnect() { connected_ = false; }
+  bool connected() const { return connected_; }
+
+ private:
+  Callback cb_;//储存的最终执行函数
+  bool connected_ = true;
+};
+</code></pre>
+<p>可以发现：</p>
+<ul>
+<li>本质上是对于<code>std::function&lt;void(Args...)&gt;</code>的一个封装，储存了事件系统中最后具体调用的函数。</li>
+<li>重写了<code>()</code>操作符，这样就可以通过类似<code>slot(p1,p2)</code>的方式来直接调用底层的函数，有一个小问题，这儿是可以使用perfect forwarding的，当时不知道为什么没有使用。</li>
+</ul>
+<h2 id="signal">Signal</h2>
+<pre><code class="language-c++">/*为了阅读，删除了一些不重要代码*/
+template &lt;typename... Args&gt;
+class Signal {
+ public:
+  using SlotPtr = std::shared_ptr&lt;Slot&lt;Args...&gt;&gt;;
+  using SlotList = std::list&lt;SlotPtr&gt;;
+  using ConnectionType = Connection&lt;Args...&gt;;
+  void operator()(Args... args) {
+    SlotList local;
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      for (auto&amp; slot : slots_) {
+        local.emplace_back(slot);
+      }
+    }
+
+    if (!local.empty()) {
+      for (auto&amp; slot : local) {
+        (*slot)(args...);
+      }
+    }
+
+    ClearDisconnectedSlots();
+  }
+  
+  ConnectionType Connect(const Callback&amp; cb) {
+    auto slot = std::make_shared&lt;Slot&lt;Args...&gt;&gt;(cb);
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      slots_.emplace_back(slot);
+    }
+
+    return ConnectionType(slot, this);
+  }
+
+  bool Disconnect(const ConnectionType&amp; conn) {
+    bool find = false;
+    {
+      std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+      for (auto&amp; slot : slots_) {
+        if (conn.HasSlot(slot)) {
+          find = true;
+          slot-&gt;Disconnect();
+        }
+      }
+    }
+
+    if (find) {
+      ClearDisconnectedSlots();
+    }
+    return find;
+  }
+  
+  void ClearDisconnectedSlots() {
+    std::lock_guard&lt;std::mutex&gt; lock(mutex_);
+    slots_.erase(
+        std::remove_if(slots_.begin(), slots_.end(),
+                       [](const SlotPtr&amp; slot) { return !slot-&gt;connected(); }),
+        slots_.end());
+  }
+  SlotList slots_;
+  std::mutex mutex_;
+};
+</code></pre>
+<p>从代码中可以解读出以下信息：</p>
+<ul>
+<li>Signal代表的某类事件，这个事件是由里面可变长参数来定义的，对于的Slot也会随之确定。</li>
+<li>一个事件支持多个处理者，里面保存了一个list的 Slot，通过``Connect<code>和</code>Disconnect<code>函数来添加或者删除Slot。</code>Connect<code>函数会返回一个</code>Connection`，这个之后会探讨。</li>
+<li>在<code>ClearDisconnectedSlots</code>函数中使用了erase-remove idom，<code>std::remove_if</code>并不会删除元素，只是把符合条件的元素移动到末位并返回对应的迭代器，之后``erase`将所有末尾的元素删除，从而完成整个删除的过程。</li>
+<li>重写了<code>()</code>操作符，具体内容是调用所有的Slot。但是没有直接调用，而是先加锁复制一份，然后调用，这样避免了 Slot中又触发Signal，从而导致死锁的问题。</li>
+</ul>
+<h2 id="connection">Connection</h2>
+<p>Connection 相比于 Signal 和 Slot 是一个更加抽象的 OOP  概念，代表了两者之间的连接，实现的方式就是同时持有对应Slot和Signal的指针，有了Connection可以让整个语法更加简洁优雅，下面是一个例子。</p>
+<pre><code class="language-c++">// 创建信号和存储连接
+Signal&lt;int&gt; value_changed;
+auto callback = [](int new_value) { std::cout &lt;&lt; &quot;Value is now: &quot; &lt;&lt; new_value &lt;&lt; std::endl; };
+auto connection = ValueChanged.Connect(callback);
+
+// 使用连接对象检查状态并按需断开
+if (connection.IsConnected()) {
+    value_changed(42);  // 触发信号
+    connection.Disconnect();  // 断开连接
+}
+</code></pre>
+<p>如果不使用Connection这个类，那么相应的逻辑就需要写在 Signal里面，大致就是Signal提供一个函数，这个函数接受一个参数来找到对应的 Slot，然后进行各种操作。使用Connection将这个逻辑独立出来从设计上更加符合单一职责原则。</p>
+<h1 id="业务封装">业务封装</h1>
+<p>前面的Slot、Signal以及Connection都是通用的，理论上任何系统都可以使用，接下来Apollo基于这些组件，在上面进一步操作，实现了更针对自动驾驶的事件系统。第一个操作就是固化，将事件类型参数固定为两个部分，``MessageT<code>和</code>MessageInfo`。第二个操作是扩展，在上面封装出更多的逻辑。</p>
+<h2 id="listenerhandler">ListenerHandler</h2>
+<p>前面<code>Signal</code>使用可变模版参数，理论上可以接受任意类型的参数，<code>ListenerHandler</code>可以看作对于<code>Signal</code>的一种特化，只接受两个参数``std::shared_ptr<Message><code>和 </code>MessageInfo`。</p>
+<pre><code class="language-c++">template &lt;typename MessageT&gt;
+class ListenerHandler : public ListenerHandlerBase {
+ public:
+  using Message = std::shared_ptr&lt;MessageT&gt;;
+  using MessageSignal = base::Signal&lt;const Message&amp;, const MessageInfo&amp;&gt;;
+
+  using Listener = std::function&lt;void(const Message&amp;, const MessageInfo&amp;)&gt;;
+  using MessageConnection =base::Connection&lt;const Message&amp;, const MessageInfo&amp;&gt;;
+  using ConnectionMap = std::unordered_map&lt;uint64_t, MessageConnection&gt;;
+
+  ListenerHandler() {}
+  virtual ~ListenerHandler() {}
+
+  void Connect(uint64_t self_id, const Listener&amp; listener);
+  void Connect(uint64_t self_id, uint64_t oppo_id, const Listener&amp; listener);
+
+  void Disconnect(uint64_t self_id) override;
+  void Disconnect(uint64_t self_id, uint64_t oppo_id) override;
+
+  void Run(const Message&amp; msg, const MessageInfo&amp; msg_info);
+  void RunFromString(const std::string&amp; str,const MessageInfo&amp; msg_info) override;
+
+ private:
+  using SignalPtr = std::shared_ptr&lt;MessageSignal&gt;;
+  using MessageSignalMap = std::unordered_map&lt;uint64_t, SignalPtr&gt;;
+  // used for self_id
+  MessageSignal signal_;
+  ConnectionMap signal_conns_;  // key: self_id
+
+  // used for self_id and oppo_id
+  MessageSignalMap signals_;  // key: oppo_id
+  // key: oppo_id
+  std::unordered_map&lt;uint64_t, ConnectionMap&gt; signals_conns_;
+
+  base::AtomicRWLock rw_lock_;
+};
+</code></pre>
+<p>可以看到<code>ListenerHandler</code>和``Signal<code>的参数接口都差不多，都是</code>Connect<code>与 </code>Disconnect<code>，然后</code>Run<code>函数对应</code>Signal<code>重写的 </code>()<code>操作符，但是能接受的参数却被固定为了两个，第一个参数是模板，第二个必须是</code>MessageInfo`，很明显这是针对自动驾驶消息传递进行的一种特化。但是在这个特化的基础上又加入了新的逻辑：</p>
+<ul>
+<li>
+<p>加入一个鉴权机制，就是在<code>Connect</code>的时候传入发送者的``id<code>并通过哈希表储存，在执行</code>Run()<code>函数的时候会通过</code>MessageInfo<code>的</code>sender_id_`字段来查询，只有在哈希表中存在才能够执行。也就是说可以选择只处理特定发送者的消息。</p>
+</li>
+<li>
+<p><code>RunFromString</code>如果消息本身是以文本的形式传过来的，就先反序列化然后调用<code>Run()</code>。</p>
+</li>
+</ul>
+<h2 id="messageinfo">MessageInfo</h2>
+<pre><code class="language-c++">/*删除了多余的不重要代码*/
+class MessageInfo {
+ public:
+  bool SerializeTo(std::string* dst) const;
+  bool SerializeTo(char* dst, std::size_t len) const;
+  bool DeserializeFrom(const std::string&amp; src);
+  bool DeserializeFrom(const char* src, std::size_t len);
+
+ private:
+  Identity sender_id_;
+  uint64_t channel_id_ = 0;
+  uint64_t seq_num_ = 0;
+  Identity spare_id_;
+  uint64_t send_time_;
+};
+</code></pre>
+<p>Apollo创建了MessageInfo 这个类，用来记录每一条消息的相关信息：</p>
+<ul>
+<li>
+<p><code>sender_id_</code>用来记录消息的发送者，<code>Identity</code>本质上存储了两个变量，第一个是调用系统<code>uuid_generate</code>生成的<code>uuid_t</code>，第二个变量是基于uuid 使用``std::hash`生成的一个uint64_t。前者用来比较Identity是否相同，后者用作id。</p>
+</li>
+<li>
+<p><code>channel_id_</code>是根据通道名称hash生成的一个<code>uint64_t</code>，具体实现函数是<code>uint64_t GlobalData::RegisterChannel(const std::string&amp; channel)</code>。也是使用``std::hash`来产生一个唯一值。</p>
+</li>
+<li>
+<p><code>seq_num_</code>是递增的，用来判断是否有丢帧或者帧重复，在发送的时候递增，具体函数在:</p>
+<pre><code class="language-c++">template &lt;typename M&gt;
+bool Transmitter&lt;M&gt;::Transmit(const MessagePtr&amp; msg) {
+  msg_info_.set_seq_num(NextSeqNum());//递增 seq_num
+  msg_info_.set_send_time(Time::Now().ToNanosecond());
+  PerfEventCache::Instance()-&gt;AddTransportEvent(
+      TransPerf::TRANSMIT_BEGIN, attr_.channel_id(), msg_info_.seq_num());
+  return Transmit(msg, msg_info_);
+}
+</code></pre>
+</li>
+<li>
+<p><code>spare_id_</code>就是备用的</p>
+</li>
+<li>
+<p><code>send_time_</code>在<code>seq_num_</code>的代码中已经提到</p>
+</li>
+</ul>
+<p>总的来说<code>MessageInfo</code>是关于Message的信息，自己本身不携带Message，但是和具体Message一起发送。</p>
+<h2 id="dispatcher">Dispatcher</h2>
+<p><code>ListenerHandler</code>解决了一种消息的处理，但是自动驾驶不止一种消息类型，为了管理多种消息以及相应的事件，需要一个更加综合的类，所以又创建了Dispatcher。</p>
+<pre><code class="language-c++">class Dispatcher {
+ public:
+  Dispatcher();
+  virtual ~Dispatcher();
+
+  virtual void Shutdown();
+
+  template &lt;typename MessageT&gt;
+  void AddListener(const RoleAttributes&amp; self_attr,
+                   const MessageListener&lt;MessageT&gt;&amp; listener);
+
+  template &lt;typename MessageT&gt;
+  void AddListener(const RoleAttributes&amp; self_attr,
+                   const RoleAttributes&amp; opposite_attr,
+                   const MessageListener&lt;MessageT&gt;&amp; listener);
+
+  template &lt;typename MessageT&gt;
+  void RemoveListener(const RoleAttributes&amp; self_attr);
+
+  template &lt;typename MessageT&gt;
+  void RemoveListener(const RoleAttributes&amp; self_attr,
+                      const RoleAttributes&amp; opposite_attr);
+
+  bool HasChannel(uint64_t channel_id);
+
+ protected:
+  std::atomic&lt;bool&gt; is_shutdown_;
+  // key: channel_id of message
+  AtomicHashMap&lt;uint64_t, ListenerHandlerBasePtr&gt; msg_listeners_;
+  base::AtomicRWLock rw_lock_;
+};
+</code></pre>
+<p>可以看到<code>Dispatcher</code>的核心数据结构就是关于<code>ListenerHandler</code>的一个哈希表：</p>
+<ul>
+<li>key是channel_id。channel_id之前提到过，是根据channel_name 生成的一个哈希值，这样设计是合理的，比如有一个channel叫做<code>/lidar</code>，那么它定义的消息类型也是确定的，同时对应的处理这个消息类型的函数参数类型也就是确定的。所以的确是一一对应的关系。</li>
+<li>键值是<code>ListenerHandlerBasePtr</code>，存储的是基类的指针，利用了多态。</li>
+</ul>
+<p>从这儿回头看，可以发现本质还是和简单的事件系统类似，就是使用数据结构将std::function存储了起来，然后在有需要的时候调用。但是对于这种过程中的每一个细节进行了细致的抽象，比如创建了<code>Connection</code>，<code>Signal</code>等概念，同时针对自动驾驶的场景进行了特化以及添加了新的逻辑。</p>
+<h2 id="transmitter-receiver">Transmitter &amp;&amp; Receiver</h2>
+<p>后面的<code>Transmitter</code>和<code>Receiver</code>从本质上就好理解了，</p>
+<ul>
+<li><code>Tansmitter</code>相当于就是Sender只是换了一个名称，它的<code>Transmit</code>函数就是在底层调用了<code>Dispatcher</code>的单例，获取了对应的<code>ListenerHandler</code>，然后调用了<code>Run()</code>函数。</li>
+<li><code>Receiver</code>就是自己的某一个类成员函数被添加到了<code>Dispatcher</code>中，然后会被调用。</li>
+</ul>
+<p>当然以上都是本质上理解，实际情况会复杂很多：</p>
+<ul>
+<li>比如<code>Receiver</code>的成员函数没有被直接执行，而是会被调度器调度，调度器又有不同的类型。为了减少 Context Switch的成本还用到了协程。</li>
+<li>函数也不是直接使用MessageT，会使用多个通道的数据，这其中又涉及到DataFusion以及数据的缓存。</li>
+<li><code>Dispather</code>也不是拿来直接用，而是作为一个基类，基于不同的通讯方式创建了三个子类 <code>IntraDispatcher</code>、<code>RtpsDispatcher</code>、<code>ShmDispatcher</code>。这些子类又有对应的<code>Receiver</code>和<code>Transmitter</code>。</li>
+<li>注册处理函数的逻辑也很复杂，从<code>Component</code>到<code>Node</code>到 <code>Reader</code>到<code>Receriver</code>，函数对象又经过了多层传递。</li>
+</ul>
+<p>不过整个框架是明了的，起码现在已经能够达至理解为什么某个通道的<code>Writer</code>发送一个信息，订阅了同一个channel的 <code>Reader</code>就能够响应了。</p>
+<h1 id="总结">总结</h1>
+<p>这次阅读代码自己有两个方向的收获：</p>
+<ol>
+<li>自己对于如何实现一个事件系统有了更深的理解</li>
+<li>对于 CyberRT的底层框架有了认知，知道了大致工作原理，这块内容是一个比较中枢的内容， 一方面也为之后阅读调度系统等更后面的机制打下了基础，另一方面也为阅读更前面的信息产生机制有帮助。</li>
+</ol>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[CppConf：How Linux Elf Symbols Work学习]]></title>
+        <id>https://WatsonShum.github.io/post/cpp-conf-xue-xi/</id>
+        <link href="https://WatsonShum.github.io/post/cpp-conf-xue-xi/">
+        </link>
+        <updated>2025-03-24T13:36:54.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="起因">起因</h1>
+<p>自己最近在工作中涉及到了一些符号相关的问题，之前工作的时候都是使用bazel之类的mono repo解决方案，所以没怎么遇到过符号冲突的问题，即使冲突了解决起来也比较简单，将冲突的库都改成动态库就好了，但是最近工作开始使用CMake，或者直接链接一个单独的.so库，然后就遇到了符号冲突的问题。一个现实的例子是，我的主程序A链接了glog，glog会生成一个全局符号，然后A链接了B，B使用glog，然后也会生成相同的全局符号，最后导致出现了符号冲突。最终由于项目结构限制，没办法修改链接方式，最终只能放弃使用glog，使用其他日志库，才解决了这个问题。期间试过许多解决方案，比如修改链接方式，使用符号隐藏，虽然最终没有采取这些方案，但是让我感受到了学习符号相关知识的必要性。于是自己寻找了Youtube上一个Cpp Conf的演讲<a href="https://www.youtube.com/watch?v=X2jFjeCDOYw">How Linux Elf Symbols Work and How They Are Used in C++ and C Programming - Anders Schau Knatten</a>，看完后大受启发，之前许多模糊不清的地方也拨云见日了，于是记录一下。</p>
+<h1 id="separate-compilation-model">Separate Compilation Model</h1>
+<p>C/C++编译流程四步：</p>
+<ul>
+<li>Preprocessing，主要就是宏展开，比如<code>#include &lt;XXX&gt;</code>就是对头文件进行复制粘贴</li>
+<li>Compilation，以每一个源文件为单位，被称为<code>Translation Unit</code>，简称<code>TU</code>，生成对应的汇编代码</li>
+<li>Assembly，对于每一个TU，将汇编代码进一步转换成二进制，这时候格式已经是ELF格式。通常以<code>.o</code>结尾，被称为目标文件。</li>
+<li>Linking，将之前所有的目标文件，生成可执行文件，或者动态链接文件。这两者也是使用ELF格式。</li>
+</ul>
+<p>其中前三个步骤都是并行的，互不影响的，所以可以使用多线程编译，可以传入类似 <code>-j=4</code>的参数来控制并行的数量。<br>
+<img src="https://WatsonShum.github.io/post-images/1743062534445.png" alt="" loading="lazy"></p>
+<p>值得注意的时候在Assembly和Linking阶段都是使用的ELF文件格式，只是后缀名会有所不同。</p>
+<h2 id="基本概念">基本概念</h2>
+<ul>
+<li>TU （Translation Unit），每一个源文件会形成一个Tranlation Unit</li>
+<li>DSO （Dynamic Shared Object），在不同的平台上名称不一样，在Windows上被称为DLL，在Linux上被称为Shared Object、Dynamic Library等，为了方便统一称为DSO。</li>
+</ul>
+<h2 id="elf-format">ELF Format</h2>
+<p>C++ 23标准有2124页，但是没有一页是关于动态链接的，因为这些都是vender specific，每家都有自己的实现方案：</p>
+<ul>
+<li>在Linux上面是ELF格式，ELF全称是 Executable and Linkable Format。</li>
+<li>macOS（及iOS等Apple系统）：使用 Mach-O（Mach Object），是macOS原生二进制文件的格式（如无扩展名的可执行文件，或.dylib、.bundle）。</li>
+<li>Windows：使用 PE（Portable Executable），扩展自COFF格式，常见于.exe、.dll、.sys等文件。</li>
+</ul>
+<p>视频使用的是ELF格式为例来进行讲解，ELF比较重要的几个Section有：</p>
+<ul>
+<li>.text 存储代码</li>
+<li>.data 存储变量</li>
+<li>.bss 存储未初始化的全局和静态变量</li>
+<li>.symtab 存储符号，符号指向具体的.data .bss 等section</li>
+<li>.dynsym</li>
+</ul>
+<h2 id="相关工具">相关工具</h2>
+<p>关于读取ELF格式有以下工具，nm，readef，strip。</p>
+<ul>
+<li><code>nm</code>命令作用是输出符号信息，这个名字的来源是在老版本的Unix 7系统中，symbol table被称为name list。</li>
+<li><code>readelf</code>，从名字可以发现<code>nm</code>主要关注name list(symbol table)，但是readelf关注整个 elf 文件，所以整体上<code>readelf</code> 比 <code>nm</code>的功能更加强大，我们可以传入<code>-s</code>参数来读取符号表，也可以传入其他参数，比如<code>-h</code>读取elf header。</li>
+<li><code>strip</code> 可以用来去除符号。</li>
+</ul>
+<h2 id="为什么需要symbol">为什么需要Symbol</h2>
+<p>Symbol本质上可以类比为指针，两者有相同的作用，会记录函数或者变量的具体地址，例如Text Symbol就指向了.text Section 里面存储的代码，C++采取分离编译模型，假设TU A引用了 TU B的内容，链接阶段链接器会使用对应的符号信息找到引用的内容。同理在动态加载DSU的时候也需要使用Symbol来确定调用的函数的地址。所以无论是编译还是链接都需要使用Symbol。</p>
+<h1 id="binding-vs-visibility">Binding vs Visibility</h1>
+<ul>
+<li>Binding指的当前TU的符号是否可以被其他TU访问，比如匿名空间里面的函数，static修饰的全局变量，对于其他TU就是不可以访问的，BInding影响DSU的创建过程。</li>
+<li>Visibility指的是当前DSU的符号对于其他DSU或者可执行文件是否能够访问。影响的是DSU的链接过程。</li>
+</ul>
+<p>在Linux上Visibility有两种，hidden和 default。我们有两种方法可以控制：</p>
+<ol>
+<li>
+<p>设置编译器属性<code>-fvisibility=hidden</code>来修改可见性，这个影响整个DSU</p>
+</li>
+<li>
+<p>使用<code>__attribute__((visibility(default|hidden)))</code>修饰来控制可见性。通常我们会将这一长串封装成一个宏。</p>
+<pre><code class="language-c++">__attribute__((visibility(&quot;default&quot;))) int api_function();
+</code></pre>
+</li>
+</ol>
+<p>值得注意的是，第二种方法的优先级高于第一种。也就是即使整个DSU符号可见效设置成隐藏，但是对于具体的函数或变量仍然可以将自己的可见性显示设置成可见。</p>
+<p>使用<code>readelf -s [target]</code>命令，可以同时看到符号的Binding和 Visibility。</p>
+<p>可见效的设置是十分必要的，有以下几点考虑：</p>
+<ul>
+<li>在将DSU提供给外部使用的时候，只需要将需要的API暴露，对于不想暴露的可以将Visibility设置成hidden。</li>
+<li>隐藏一些符号，有助于避免符号冲突</li>
+</ul>
+<h1 id="三种symbol-table">三种Symbol Table</h1>
+<p>在一个DSU的ELF文件中，可能同时存在三个关于Symbol的Section，它们分别是：</p>
+<ul>
+<li><strong>.symtab</strong>, 由之前所有的目标文件的.symtab通过一定规则合并而来，由于只会在编译和链接的时候会用到，可以称为 static symbol table</li>
+<li><strong>.dynsym</strong>，表示当前DSU向外提供的一部分API，内容由符号的可见效决定，在运行时动态加载会用到，称为 dynamic symbol table。</li>
+<li><strong>.dbg_info</strong>、<strong>.debug_line</strong>等储存了更多的信息用于debug，例如不仅储存了symbol对应的地址，还储存了代码行号等信息。可以统称为debug symbol table。</li>
+</ul>
+<p>其中static symbol table 和debug symbol table 不是必须的，没有这两者程序也可以运行，在链接完成后可以通过<code>strip</code>，命令去掉，但是.dynsym是必须的，链接器（如 <code>ld-linux.so</code>）依赖.dynsym查询出能够使用的符号。</p>
+<p>下面是<code>strip</code>的不同选项对于三种符号表的操作结果。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left"><strong>命令/选项</strong></th>
+<th style="text-align:left"><strong>.symtab</strong></th>
+<th style="text-align:left"><strong>.dynsym</strong></th>
+<th style="text-align:left"><strong>.debug_</strong>*</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>strip --strip-all</code>/ <code>strip -s</code></td>
+<td style="text-align:left">移除</td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">移除</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>strip --strip-debug</code>/ <code>strip -g</code>/ <code>strip -d</code></td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">移除</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>strip --strip-unneeded</code></td>
+<td style="text-align:left">部分移除<sup>*</sup></td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">保留</td>
+</tr>
+</tbody>
+</table>
+<h1 id="symbol-type">Symbol Type</h1>
+<h2 id="data-symbol">Data Symbol</h2>
+<p>Data Symbol指向 .data Section里面的内容，根据Binding可以分为Local和Global<br>
+以下面的代码为例：</p>
+<pre><code class="language-c++">int value = 42;
+static int s_value = 42;
+int unintializedValue;
+static int uninitializedStaticValue;
+namespace{
+    int valueInAnonymousNamespace = 42;
+}
+namespace named{
+    int valueInNamedNamespace = 42;
+}
+void someFunction(){
+    static int functionStaticValue = 300; // 这也是局部符号
+    int functionLocalValue = 300;
+}
+
+class MyClass
+{
+public:
+    static int classStaticValue;
+};
+int MyClass::classStaticValue = 400; // 如果没有外部引用，通常是局部的
+
+auto lambda = [](){
+    static int lambdaStaticValue = 500;
+    return lambdaStaticValue;
+};
+
+</code></pre>
+<p>我们在Ubuntu22上面使用<code>g++ -c values.cc -o values.o</code>生成目标文件，然后使用<code>nm values.o</code>,可以得到如下结果：</p>
+<pre><code class="language-shell">#nm values.o 
+0000000000000000 T _Z12someFunctionv
+0000000000000008 b _ZL24uninitializedStaticValue
+0000000000000004 d _ZL7s_value
+0000000000000008 d _ZN12_GLOBAL__N_125valueInAnonymousNamespaceE
+000000000000000c D _ZN5named21valueInNamedNamespaceE
+0000000000000014 D _ZN7MyClass16classStaticValueE
+0000000000000010 d _ZZ12someFunctionvE19functionStaticValue
+0000000000000004 B lambda
+0000000000000000 B unintializedValue
+0000000000000000 D value
+</code></pre>
+<p>最右侧是经过mangle后的符号名称，但是我们仍然可以根据特征将之与变量名称对应，中间的字母表示符号的类型，D和d表示符号指向 .data section。其中D表示当前符号是全局的，可以在当前TU之外的地方访问。d表示仅仅能够在当前TU中被访问，可以发现以下的操作会将符号改变符号的Binding为Local。</p>
+<ul>
+<li>使用<code>static</code>关键字修饰全局变量，例如<code>s_value</code></li>
+<li>使用<code>static</code>关键字修饰函数局部变量，例如<code>functionStaticValue</code>和</li>
+<li>匿名空间里面的变量，比如<code>valueInAnonymousNamespace</code></li>
+</ul>
+<p>我们发现以下情况变量的Binding是Global。</p>
+<ul>
+<li>使用<code>static</code>关键字修饰类成员，例如<code>classStaticValue</code>符号是D，这个是符合之前常识的，和之前的语法相对应，其他地方可以通过<code>MyClass::classStaticValue</code>来访问。</li>
+<li>有名称的命名空间中的变量，例如<code>valueInNamedNamespace</code>。这个也是符合之前认知的，其他地方可以通过<code>named::valueInNamedNamespace</code>来访问。</li>
+<li>全局变量，例如<code>value</code></li>
+</ul>
+<p>但是注意并不是所有的变量都会有符号，比如函数中的局部变量，因为：</p>
+<ul>
+<li>局部变量存储在栈上，而不是全局数据段</li>
+<li>局部变量的生命周期仅限于函数执行期间</li>
+</ul>
+<h2 id="text-symbol">Text Symbol</h2>
+<p>Text Symbol指向函数，例如全局函数，以及类的成员函数。以下面的代码为例：</p>
+<pre><code class="language-c++">void GlobalFunction(){
+    return;
+}
+static void StaticFunction(){
+    return;
+}
+
+class SomeClass
+{
+public:
+    void MemberFunction();
+    static void StaticFunction();
+};
+
+void SomeClass::MemberFunction(){
+    return;
+}
+void SomeClass::StaticFunction(){
+    return;
+}
+namespace {
+    void AnonymousFunction(){
+        return;
+    }
+}
+void Use(){
+    StaticFunction();
+    AnonymousFunction();
+}
+</code></pre>
+<p>经过<code>gcc</code>编译后，使用<code>nm -C</code>查看，可以得到如下的符号表，其中<code>T</code>表示Binding为Global，<code>t</code>表示Binding为Local：</p>
+<pre><code class="language-c++">0000000000000000 T GlobalFunction()
+0000000000000018 T Use()
+0000000000000030 t StaticFunction()
+0000000000000034 t (anonymous namespace)::AnonymousFunction()
+0000000000000004 T SomeClass::MemberFunction()
+0000000000000014 T SomeClass::StaticFunction()
+0000000000000000 t ltmp0
+0000000000000038 s ltmp1
+</code></pre>
+<p>有以下的发现：</p>
+<ul>
+<li>
+<p>匿名空间或者<code>static</code>修饰的函数，Binding 为Local。</p>
+</li>
+<li>
+<p>类的成员函数是Global Text Symbol，这是因为从本质上来说类只是被包装起来的一个假象，类的成员函数会被编译器改写为普通函数，并隐式添加一个 <code>this</code> 指针参数。例如：</p>
+<pre><code class="language-c++">class SomeClass {
+public:
+    void MemberFunction(int x);
+};
+</code></pre>
+<p>编译后，<code>MemberFunction</code> 会被处理为类似：</p>
+<pre><code class="language-c++">void SomeClass_MemberFunction(SomeClass* this, int x); // 伪代码表示
+</code></pre>
+<p><code>this</code> 作为第一个参数传递。当调用类的成员函数的时候，第一个参数实际上是类实例的指针。在python中显示地体现了这个逻辑，每一个类成员函数第一个参数都是<code>self</code>。因此，类的成员函数调用本质上是普通函数调用，两者都对应Text Symbol。</p>
+</li>
+<li>
+<p>类的静态成员函数是Global Text Symbol，那是因为本质上它和全局函数类似，相比于类的普通函数还少了实例指针，这也解释了为什么类的静态函数里面无法访问非静态成员，因为它没有对应的实例指针，但是非静态函数却可以访问静态成员和调用静态函数，因为这些操作不需要实例指针。</p>
+</li>
+</ul>
+<h2 id="weak-symbol">Weak Symbol</h2>
+<p>当有相同的Text Symbol或者Data Symbol 重命的时候，我们会收到multiple definition的变异报错，但是对于定义在头文件的一个类或者模板函数，我们多处include，却不会报错，这是为什么呢？ 这与Weak Symbol相关。</p>
+<p>编译器对于Weak Symbol采取如下规则：</p>
+<ul>
+<li>允许出现多个相同的Weak Symbol，在链接的时候会合并所有重复的弱符号，仅保留一个定义，避免冲突；</li>
+<li>若存在同名的强符号和弱符号，链接器优先选择强符号；</li>
+</ul>
+<pre><code class="language-c++">
+__attribute__((weak)) void WeakFunction() {
+    return;
+}
+struct SomeClass {
+     int ImplicitInlineFunc() { return 2; }
+     int NotInlineFunc();
+};
+
+int SomeClass::NotInlineFunc() {
+    return 3;
+}
+
+template&lt;typename T&gt; T GetValue() { return 1; }
+
+template&lt;&gt;
+double GetValue&lt;double&gt;() {
+    return 42; // 返回一个特殊值
+}
+int UseIt(){
+    SomeClass obj;
+    return obj.InexplicitInlineFunc()+GetValue&lt;int&gt;();
+}
+</code></pre>
+<p>在编译后，我们使用<code>nm -c [target]</code>命令查看，得到以下的内容。</p>
+<pre><code class="language-shell">0000000000000000 W WeakFunction()
+000000000000003b T UseIt()
+000000000000001f T double GetValue&lt;double&gt;()
+0000000000000000 W int GetValue&lt;int&gt;()
+000000000000000c T SomeClass::NotInlineFunc()
+0000000000000000 W SomeClass::ImplicitInlineFunc()
+                 U __stack_chk_fail
+</code></pre>
+<p>我们可以得到以下结论：</p>
+<ul>
+<li>类的内联函数是Weak Symbol，比如<code>SomeClass::ImplicitInlineFunc()</code>，但是非内联函数不是Weak Symbol，而和普通函数一样是Text Symbol 比如<code>SomeClass::NotInlineFunc()</code>。</li>
+<li>Template Method是Weak Symbol，但是完全特化的Template Method和普通函数一样是Text Symbol，比如<code>double GetValue&lt;double&gt;()</code>。所以完全特化的Template Method的声明可以写在头文件里面，但是实现必须写在源文件里面，和普通函数一样。</li>
+<li>我们可以使用<code>__attribute__((weak))</code>显示将一个函数声明为Weak Symbol。</li>
+</ul>
+<p>将一个函数显示声明为Weak Symbol有一个妙用，就是允许用户重写特定的函数，假设我们有如下API。</p>
+<pre><code>__attribute__((weak)) struct Resource* loadResource() {/*load from file*/}
+</code></pre>
+<p>这个API 默认是从文件中加载资源，但是如果用户希望能够从其他地方加载资源，就可以根据自己的需求重写<code>loadResource()</code>,定义一个强符号Text Symbol对其进行覆盖。用户可能会采取如下的实现之一；</p>
+<pre><code>struct Resource* loadResource() {/*load from database*/}
+struct Resource* loadResource() {/*load from network*/}
+struct Resource* loadResource() {/*load from memory*/}
+</code></pre>
+<h2 id="unique-symbol">Unique Symbol</h2>
+<p>在C++ 17中扩展了inline 关键字的使用范围，比如可以用来修饰全局变量，和类的静态成员，从而允许可以将上述两者的声明和实现都放在头文件中。</p>
+<pre><code class="language-c++">inline int GlobalValue = 1; 
+struct SomeClass { 
+     static int inline InlineStaicMethod() { return InlineStaticField; } 
+     static inline int InlineStaticField = 2; 
+     static int StaticField;
+};
+
+int SomeClass::StaticField = 4; // static member initialization
+
+int main() { 
+    return GlobalValue + SomeClass::InlineSttaicMethod(); 
+}
+</code></pre>
+<p>上面的代码使用<code>g++</code>编译后，可以使用<code>nm -C</code>命令查看，可以得到下面的符号表，其中Uniqe Symbol用作小写的 <strong>u</strong>表示。</p>
+<pre><code class="language-shell">0000000000000000 u GlobalValue
+0000000000000000 D SomeClass::StaticField
+0000000000000000 u SomeClass::InlineStaticField
+0000000000000000 W SomeClass::InlineStaicMethod()
+0000000000000000 T main
+</code></pre>
+<p>经过观察可以得到如下有趣的规则：</p>
+<ul>
+<li>可以发现使用<code>inline</code>修饰的全局变量类的静态成员变量都是Unique Symbol。</li>
+<li>但是对于Static Class Method，会默认内联，这时候即使再显示使用<code>inline</code>修饰，仍然是Weak Symbol。</li>
+<li>对于没有Static Class Field，如果没有用inline修饰就是Data Symbol，如果使用了<code>inline</code>修饰就是Unique Symbol，虽然两者从作用上来说都差不多，只是后者方便了一点儿。</li>
+</ul>
+<p>值得注意的是Unique Symbol是 GCC使用的方法，Clang不使用这个方法，所以使用<code>clang</code>编译，得到的符号表如下。</p>
+<pre><code class="language-shell">0000000000000000 V GlobalValue
+0000000000000000 D SomeClass::StaticField
+0000000000000000 V SomeClass::InlineStaticField
+0000000000000000 W SomeClass::InlineSttaicMethod()
+0000000000000000 T main
+</code></pre>
+<p><code>V</code>表示弱对象符号，类似于GCC的<code>W</code>。</p>
+<h2 id="undefined-symbol">Undefined Symbol</h2>
+<p>C++采用分离编译模型，每个翻译单元（TU）独立编译。如果 TU A 引用了 TU B 中的函数或变量，TU A 的编译阶段只需这些符号的声明，编译器会将其标记为Undefined Symbol并记录在目标文件中。链接阶段，链接器在所有目标文件中查找这些符号的定义。若找不到，则报未定义符号错误。</p>
+<pre><code class="language-c++">extern int ExternalValue; // 这是一个外部符号
+int UninitializedValue; // 这是一个未初始化的全局变量
+void FunctionDeclaration();
+extern void ExternFunctionDeclaration();
+int main()
+{
+    ExternalValue = 100;
+    FunctionDeclaration();
+    ExternFunctionDeclaration();
+    return 0;
+}
+</code></pre>
+<p>使用<code>g++</code>编译后，使用<code>nm -C</code>命令查看，可以得到如下的符号表：</p>
+<pre><code class="language-shell">                 U ExternalValue
+0000000000000000 B UninitializedValue
+                 U FunctionDeclaration()
+                 U ExternFunctionDeclaration()
+0000000000000000 T main
+</code></pre>
+<p>Undefined Symbol使用大写的<strong>U</strong>，Unique Symbol使用小写的<strong>u</strong>。可以得到以下结论：</p>
+<ul>
+<li>对于函数声明，如果没有实现，无论是否使用``extern`修饰都是Undefined Symbol。</li>
+<li>对于全局变量声明，如果使用<code>extern</code>修饰会是Undefined Symbol，如果不使用会是BSS Symbol。</li>
+</ul>
+<p>在C++中如果多次声明一个函数不会报错，但是多次声明一个变量却会报错：</p>
+<pre><code class="language-c++">int UninitializedValue; 
+int UninitializedValue; // 报错redefinition错误
+void FunctionDeclaration();
+void FunctionDeclaration();
+extern void FunctionDeclaration();//不报错，只会产生一个Undefined Symbol
+</code></pre>
+<p>所以理论上只要函数签名保持一致，函数声明加不加<code>extern</code>关键字无所谓。</p>
+<h1 id="总结">总结</h1>
+<p>这次较为系统地学习了Symbol相关的内容，这次学习后可以有以下好处：</p>
+<ul>
+<li>能够更好地处理编译时的各种报错，比如对于redefinition以及undefined symbol错误有更深的理解。</li>
+<li>对于C++的语法有更深的理解。
+<ul>
+<li>比如<code>static</code>关键字的几种用法，最开始似懂非懂，只知道需要背下来，后来用得多了，自然会，这次进一步学习了里面的底层原理。之前遇到的各种语法规则现在都找到了合理的解释。</li>
+<li>还有对于类的成员函数的理解，之前遇到过一个问题，一个类的成员函数签名看起来和一个全局函数签名一样，但是就是无法绑定，原因是前者有一个隐藏的实例指针参数。这次有了更加深刻的理解。</li>
+<li>再比如之前遇到过一个问题，为什么模板函数的实现可以写在头文件，但是完全特化的模板函数的实现就必须写在源文件，这次也有了更深层次的理解。</li>
+</ul>
+</li>
+</ul>
+<p>对于整个编译过程其实更多可以学习的，比如链接时的relocation，之后看需要可以继续学习，最后将<a href="https://github.com/WatsonShum/elf_symbols_learn">本文的相关代码</a>整理到了一个仓库中方便之后的学习。</p>
+<h1 id="参考">参考</h1>
+<ul>
+<li><a href="https://www.youtube.com/watch?v=X2jFjeCDOYw&amp;t=1326s">How Linux Elf Symbols Work and How They Are Used in C++ and C Programming - Anders Schau Knatten</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Nm_(Unix)">WikiPedia nm (Unix)</a></li>
+<li><a href="https://stackoverflow.com/questions/79157458/what-is-the-difference-of-weak-and-unique-symbol-binding">StackOverflow：What is the difference of weak and unique symbol binding?</a></li>
+</ul>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[百度 Apollo 开源项目 Record 模块源码阅读]]></title>
+        <id>https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-record-mo-kuai-yuan-ma-yue-du/</id>
+        <link href="https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-record-mo-kuai-yuan-ma-yue-du/">
+        </link>
+        <updated>2025-03-20T08:59:02.000Z</updated>
+        <content type="html"><![CDATA[<p>百度的 Apollo 项目在自动驾驶领域是一个知名的项目，自动驾驶涉及许多数据，例如传感器数据、算法数据等。Apollo 项目在存储这些数据的时候使用了自定义的 Record 格式，之前自己一直使用这个模块，但是对于深层次的原理没有一探究竟，最近有时间对其源码进行了阅读，写一些文字记录一下学习心得。<br>
+主要参考的源码：</p>
+<ul>
+<li><a href="https://github.com/ApolloAuto/apollo/tree/master/cyber/record">Record实现</a></li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/master/cyber/proto/record.proto">Proto定义</a></li>
+</ul>
+<h1 id="record格式的一些基本概念">Record格式的一些基本概念</h1>
+<ul>
+<li><code>chunk</code>：表示的是每次往文件系统里面写入的数据量，假如 <code>chunk_interval</code> 设置成 10M，那么内存中每累计 10M数据，就会往文件系统里面写入一次。</li>
+<li><code>segment</code>：自动分文件，如果将 <code>segment_interval</code> 设置成 1G，那么数据会每满 1G 就停止写入当前文件，创建一个新文件写入。</li>
+</ul>
+<h1 id="基本数据结构">基本数据结构</h1>
+<p>整个Record可以看作如下结构的不断重复。<code>[Section][数据块][Section][数据块]...[Section][数据块] </code>，实现了类似&quot;TLV&quot;(Type-Length-Value)的模式。</p>
+<p><code>section</code> 表示record格式里面不同的数据类别，</p>
+<ul>
+<li>type字段告诉解析器后续数据是什么类型，这决定了如何解释和处理这些数据。这实现了一种多态机制，允许单个文件包含不同类型的数据段，比如有<code>Header</code>、<code>Index</code>等。</li>
+<li>size字段提供了数据块的准确大小，使解析器能够：
+<ul>
+<li>精确知道需要读取多少字节</li>
+<li>在不需要处理某种类型数据时直接跳过</li>
+</ul>
+</li>
+</ul>
+<p>具体的定义如下。</p>
+<pre><code class="language-c++">  enum SectionType {
+    SECTION_HEADER = 0;
+    SECTION_CHUNK_HEADER = 1;
+    SECTION_CHUNK_BODY = 2;
+    SECTION_INDEX = 3;
+    SECTION_CHANNEL = 4;
+  };
+</code></pre>
+<pre><code class="language-c++">  struct Section {
+    proto::SectionType type;//具体section的Type，如上面的定义
+    int64_t size;//后面消息的大小
+  };
+</code></pre>
+<p>一点儿小问题：由于不同的编译器或者系统内存对齐的方式不一样，所以Section这个struct在不同条件下可能内存布局并不一样，理论上会产生兼容性问题。但是考虑到Apollo主要是在Linux平台运行，所以这个问题并没有暴露出来，进一步可以使用<code>#pragma pack</code>优化。</p>
+<p>Record数据顺序：开头是Header，中间Channel、Chunck Header和Chunk Body，最后是Index，Index和Header 是最后写入的，因为它们的数据很多对之前数据的统计，只能最后写入。有两点需要注意：</p>
+<ul>
+<li>Header虽然是最后写入，但是写入位置是放到最前面的，在这个过程中采取了一些小技巧，之后讨论。</li>
+<li>如果最后的Index写入过程出了问题，那么这个Record会暂时被标记为<code>incomplete</code>,但是索引是可以重建的，因为Index依赖的前面的数据都还存在。Apollo代码库提供了<a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recoverer.cc">recover</a>来完成上面的功能。<br>
+上面讨论了整体的数据结构，下面来讨论一下每种<code>SectionType</code>的具体数据结构。</li>
+</ul>
+<h2 id="header的定义">Header的定义</h2>
+<pre><code class="language-c++">message Header {
+  optional uint32 major_version = 1;
+  optional uint32 minor_version = 2;
+  optional CompressType compress = 3;
+  optional uint64 chunk_interval = 4;//一个chunk多大
+  optional uint64 segment_interval = 5;//一个segment多大
+  optional uint64 index_position = 6 [default = 0];
+  optional uint64 chunk_number = 7 [default = 0];//记录一个record里面有多少chubk
+  optional uint64 channel_number = 8 [default = 0];//记录一个record里面有多少channel
+  optional uint64 begin_time = 9 [default = 0];//整个record的开始时间
+  optional uint64 end_time = 10 [default = 0];//整个record的结束时间
+  optional uint64 message_number = 11 [default = 0];//一共有多少消息
+  optional uint64 size = 12 [default = 0];
+  optional bool is_complete = 13 [default = false];//是否完整，主要是判断后最后面有没有index
+  optional uint64 chunk_raw_size = 14;
+  optional uint64 segment_raw_size = 15;
+  optional MapInfo map_info = 16;
+  optional VehicleInfo vehicle_info = 17;
+}
+</code></pre>
+<p>Header记录了整个Record总体信息，比如开始时间，结束时间，消息总数，以及一些配置，例如<code>chunk_interval</code>和<code>segment_interval</code>。</p>
+<h2 id="chunk相关的定义">Chunk相关的定义</h2>
+<pre><code class="language-c++">message ChunkHeader {
+  optional uint64 begin_time = 1;//当前chunk的开始时间
+  optional uint64 end_time = 2;//当前chunk的结束时间
+  optional uint64 message_number = 3;//当前chunk的消息数量
+  optional uint64 raw_size = 4;//当前chunk的文件大小
+}
+
+message ChunkBody {
+  repeated SingleMessage messages = 1;//实际储存的消息
+}
+message SingleMessage {
+  optional string channel_name = 1;
+  optional uint64 time = 2;
+  optional bytes content = 3;
+}
+</code></pre>
+<p>ChunkHeader记录了当前Chunk的一些总体信息，例如开始时间，结束时间，以及消息数量。ChunkBody记录储存了具体信息，类似于一个消息数组。</p>
+<h2 id="index的定义">Index的定义</h2>
+<pre><code class="language-c++">message SingleIndex {
+  optional SectionType type = 1;//记录是什么数据的index
+  optional uint64 position = 2;//记录文件位置
+  oneof cache {//记录一些cache信息
+    ChannelCache channel_cache = 101;
+    ChunkHeaderCache chunk_header_cache = 102;
+    ChunkBodyCache chunk_body_cache = 103;
+  }
+}
+message Index {
+  repeated SingleIndex indexes = 1;
+}
+</code></pre>
+<p>Index储存了之前每个Section的索引信息，记录了文件位置，可以用来随机读取。</p>
+<h2 id="channel的定义">Channel的定义</h2>
+<pre><code class="language-c++">message Channel {
+  optional string name = 1;
+  optional string message_type = 2;
+  optional bytes proto_desc = 3;
+}
+</code></pre>
+<h1 id="支持多种message格式">支持多种Message格式</h1>
+<p>Record格式可以看作对于Protobuf格式的又一层封装，Protobuf格式一般是根据proto文件的定义来进行序列化和反序列化的，假如现在有一个<code>repeated message A</code>我现在想新加一种类型，那么我就只能修改原先的proto定义，加上<code>repeated message B</code>，也就是整个序列化和反序列化过程依赖一个proto消息的定义，必须一一对应，有一些缺点：</p>
+<ul>
+<li>不灵活，所有消息必须在用一个proto message中声明才能序列化和反序列化。</li>
+<li>没有办法支持任意类型消息的存储。<br>
+Record采取了以下方案。</li>
+</ul>
+<pre><code class="language-c++">message SingleMessage {
+  optional string channel_name = 1;
+  optional uint64 time = 2;
+  optional bytes content = 3;
+}
+</code></pre>
+<pre><code class="language-c++">template &lt;&gt;
+inline bool RecordWriter::WriteMessage(const std::string&amp; channel_name,
+                                       const std::string&amp; message,//string
+                                       const uint64_t time_nanosec,
+                                       const std::string&amp; proto_desc) {
+  proto::SingleMessage single_msg;
+  single_msg.set_channel_name(channel_name);
+  single_msg.set_content(message);
+  single_msg.set_time(time_nanosec);
+  return WriteMessage(single_msg);
+}
+</code></pre>
+<p>Record定义了<code>SingleMessage</code>,对所有消息进行封装。其中<code>content</code>字段表示实际的消息内容。也就是在写入消息的时候，首先都统一转化成string，这样有两个方向的好处：</p>
+<ul>
+<li>不必要再和某个message消息一一对应，支持多种来源，多个地方定义的proto消息的序列化和反序列化。</li>
+<li>可以支持其他格式的消息，比如json，只需要知道对应序列化和反序列化的方法就行。</li>
+</ul>
+<p>这样设计有一个trade-off就是增加序列化和反序列化的次数，原先只需要进行一次，现在<code>SingleMessage</code>和<code>content</code>都需要序列化和反序列化，增加了CPU的开销，但是相比与通用性和兼容性的提升，我觉得是值得的。</p>
+<h1 id="文件系统底层函数">文件系统底层函数</h1>
+<p>Record格式使用了如下的底层文件操作函数：</p>
+<ul>
+<li>
+<p><code>ssize_t read(int fd, void *buf, size_t count)</code><br>
+posix标准系统调用，用于从文件描述符读取数据<br>
+参数含义：</p>
+<ul>
+<li>fd_：文件描述符，指向已打开的记录文件</li>
+<li>buf：接收数据的缓冲区</li>
+<li>count：请求读取的字节数</li>
+</ul>
+<p>返回值 (count)：</p>
+<ul>
+<li>正值：实际读取的字节数</li>
+<li>0：表示已到达文件末尾(EOF)</li>
+<li>-1：读取失败，errno变量会包含错误原因</li>
+</ul>
+<p>关键特性：</p>
+<ul>
+<li>文件位置：每次成功读取后，文件位置指针自动向前移动读取的字节数</li>
+<li>可能读取不足：可能读取的字节数少于请求的字节数，这就是为什么需要检查返回值</li>
+<li>阻塞行为：默认情况下是阻塞调用，直到有数据可读或发生错误</li>
+</ul>
+</li>
+<li>
+<p><code>ssize_t write(int fd, const void *buf, size_t count)</code></p>
+<p>参数含义：</p>
+<ul>
+<li>fd_：文件描述符，指向要写入的目标文件</li>
+<li>buf：源数据缓冲区</li>
+<li>count：要写入的字节数</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>正值：实际成功写入的字节数</li>
+<li>-1：写入失败，errno变量会包含错误原因</li>
+</ul>
+<p>文件位置指针行为：</p>
+<ul>
+<li>与read类似，write也会从当前文件位置开始写入数据</li>
+<li>成功写入后，文件位置指针自动向前移动所写入的字节数<br>
+这使得连续的write调用可以顺序追加数据到文件中</li>
+</ul>
+</li>
+<li>
+<p><code>off_t pos = lseek(fd_, 0, SEEK_CUR);</code><br>
+纯查询操作，获取当前位置,Apollo据此封装了<code>CurrentPosition</code>函数：</p>
+<pre><code class="language-C++">int64_t RecordFileBase::CurrentPosition() {
+off_t pos = lseek(fd_, 0, SEEK_CUR);
+if (pos &lt; 0) {
+    AERROR &lt;&lt; &quot;lseek failed, file: &quot; &lt;&lt; path_ &lt;&lt; &quot;, fd: &quot; &lt;&lt; fd_
+        &lt;&lt; &quot;, offset: 0, whence: SEEK_CUR&quot;
+        &lt;&lt; &quot;, position: &quot; &lt;&lt; pos &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+}
+return pos;
+}
+</code></pre>
+</li>
+<li>
+<p><code>off_t pos = lseek(fd_, position, SEEK_SET);</code><br>
+将 fd_设置为从文件开头后 position 的位置。Apollo根据这个封装了<code>SetPosition()</code>函数。</p>
+<pre><code class="language-c++">bool RecordFileBase::SetPosition(int64_t position) {
+    off_t pos = lseek(fd_, position, SEEK_SET);
+    if (pos &lt; 0) {
+    AERROR &lt;&lt; &quot;lseek failed, file: &quot; &lt;&lt; path_ &lt;&lt; &quot;, fd: &quot; &lt;&lt; fd_
+            &lt;&lt; &quot;, offset: 0, whence: SEEK_SET&quot;
+            &lt;&lt; &quot;, position: &quot; &lt;&lt; pos &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+    return false;
+    }
+    return true;
+}
+</code></pre>
+</li>
+</ul>
+<p>由于以上的函数都是 posix 标准的函数，再加上C++的跨平台性，理论上支持 posix 标准的系统都可以支持 Record 格式，Apollo 官方是在 Linux 系统上使用 Record 格式，个人经过尝试确定在 MacOS系统上也可以正常工作。</p>
+<h1 id="record-的写入实现">Record 的写入实现</h1>
+<p>上文已经介绍了Record的数据结构和使用的底层函数，现在来讨论具体的写入实现，会发现十分简单易懂。下面这个函数是写入数据的核心函数。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;
+bool RecordFileWriter::WriteSection(const T&amp; message) {
+  proto::SectionType type;
+  //根据模板类型，确定section的type，实际上写成一个type traits更好。
+  if (std::is_same&lt;T, proto::ChunkHeader&gt;::value) {
+    type = proto::SectionType::SECTION_CHUNK_HEADER;
+  } else if (std::is_same&lt;T, proto::ChunkBody&gt;::value) {
+    type = proto::SectionType::SECTION_CHUNK_BODY;
+  } else if (std::is_same&lt;T, proto::Channel&gt;::value) {
+    type = proto::SectionType::SECTION_CHANNEL;
+  } else if (std::is_same&lt;T, proto::Header&gt;::value) {
+    type = proto::SectionType::SECTION_HEADER;
+    if (!SetPosition(0)) {//将文件指针移动到文件开头，用于写Header
+      AERROR &lt;&lt; &quot;Jump to position #0 failed&quot;;
+      return false;
+    }
+  } else if (std::is_same&lt;T, proto::Index&gt;::value) {
+    type = proto::SectionType::SECTION_INDEX;
+  } else {
+    AERROR &lt;&lt; &quot;Do not support this template typename.&quot;;
+    return false;
+  }
+  Section section;
+  /// zero out whole struct even if padded
+  memset(&amp;section, 0, sizeof(section));
+  section = {type, static_cast&lt;int64_t&gt;(message.ByteSizeLong())};
+  //写入section
+  ssize_t count = write(fd_, &amp;section, sizeof(section));
+  if (count &lt; 0) {
+    AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_ &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+    return false;
+  }
+  if (count != sizeof(section)) {
+    AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_
+           &lt;&lt; &quot;, expect count: &quot; &lt;&lt; sizeof(section)
+           &lt;&lt; &quot;, actual count: &quot; &lt;&lt; count;
+    return false;
+  }
+  {
+    //使用RAII，写入具体的message
+    google::protobuf::io::FileOutputStream raw_output(fd_);
+    message.SerializeToZeroCopyStream(&amp;raw_output);
+  }
+  if (type == proto::SectionType::SECTION_HEADER) {//填充Header
+    static char blank[HEADER_LENGTH] = {'0'};
+    count = write(fd_, &amp;blank, HEADER_LENGTH - message.ByteSizeLong());
+    if (count &lt; 0) {
+      AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_ &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+      return false;
+    }
+    if (static_cast&lt;size_t&gt;(count) != HEADER_LENGTH - message.ByteSizeLong()) {
+      AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_
+             &lt;&lt; &quot;, expect count: &quot; &lt;&lt; sizeof(section)
+             &lt;&lt; &quot;, actual count: &quot; &lt;&lt; count;
+      return false;
+    }
+  }
+  header_.set_size(CurrentPosition());
+  return true;
+}
+</code></pre>
+<p>整个代码的逻辑就根据之前描述的一样，先写Section，然后后面写对于ProtoMessage，但是对于Header的写入做了特殊处理。由于Header里面的信息比如<code>end_time</code>直到最后才确定，但是又希望将它放到文件开头，采取的措施是在最开始的写入了一个空的Header作为占位符，等到需要写入Header的时候，使用<code>SetPosition(0)</code>将指针移动到开头，然后写入新的Header来覆盖之前的占位符。</p>
+<h1 id="chunk并行写入的实现">chunk并行写入的实现</h1>
+<p>上面我们了解了是如何完成写入的，但是将写入的过程放到当前线程并不是一个好的选择，因为往文件系统写文件会触发系统 IO，如果直接在当前线程写入，会影响当前线程的效率。导致当前线程 CPU 等待。从而影响当前线程其他地方代码的执行效率。这个问题主要是在写入Message的时候存在，因为Header和Index的写入都是一次性，而且都是在开头或者结尾，是系统初始化和关闭的时候，对于运行时的效率影响较小。但是Message是不断地写入的，所以需要优化，Apollo采取了以下的优化方法：</p>
+<ul>
+<li>单生产者和单消费者模式，使用一个专门的线程来负责将数据写入文件系统。其他线程将数据放到一个地方， 消费者线程来获取，一个线程专门负责写文件，从而避免了对其他线程的影响。</li>
+<li>使用了双缓冲模式，为了实现两个线程高效的数据通信，维护了两个 chunk，生产者线程不断地往第一个 chunk 里面写数据，当第一个 chunk 满足一定条件后，将两个 chunk 互相交换，并通知消费者线程来消费第二个 chunk，循环往复。</li>
+</ul>
+<pre><code class="language-c++">//写入线程
+bool RecordFileWriter::WriteMessage(const proto::SingleMessage&amp; message) {
+    //去掉部分无关代码
+    //将消息写入当前chubk
+  chunk_active_-&gt;add(message);
+  bool need_flush = false;
+  //判断是不是需要flush
+  if (header_.chunk_interval() &gt; 0 &amp;&amp;
+      message.time() - chunk_active_-&gt;header_.begin_time() &gt;
+          header_.chunk_interval()) {
+    need_flush = true;
+  }
+  if (!in_writing_ &amp;&amp; header_.chunk_raw_size() &gt; 0 &amp;&amp;
+      chunk_active_-&gt;header_.raw_size() &gt; header_.chunk_raw_size()) {
+    need_flush = true;
+  }
+  //如果不需要flush就返回
+  if (!need_flush) {
+    return true;
+  }
+  {
+    //进行flush操作
+    std::unique_lock&lt;std::mutex&gt; flush_lock(flush_mutex_);
+    chunk_flush_.swap(chunk_active_);
+    flush_cv_.notify_one();
+  }
+  return true;
+}
+//flush 线程
+void RecordFileWriter::Flush() {
+  while (is_writing_) {
+    std::unique_lock&lt;std::mutex&gt; flush_lock(flush_mutex_);
+    //在这儿等待
+    flush_cv_.wait(flush_lock,
+                   [this] { return !chunk_flush_-&gt;empty() || !is_writing_; });
+    if (!is_writing_) {
+      break;
+    }
+    if (chunk_flush_-&gt;empty()) {
+      continue;
+    }
+    in_writing_ = true;
+    //将数据写入文件系统
+    if (!WriteChunk(chunk_flush_-&gt;header_, *(chunk_flush_-&gt;body_.get()))) {
+      AERROR &lt;&lt; &quot;Write chunk fail.&quot;;
+    }
+    in_writing_ = false;
+    chunk_flush_-&gt;clear();
+  }
+}
+</code></pre>
+<p>关键点分析：</p>
+<ul>
+<li>使用了<code>flush_mutex_</code>来控制 flush 线程和数据交换。当<code>need_flush</code>为 true 的时候，写入线程会尝试获取<code>flush_lock(flush_mutex_)</code>。
+<ul>
+<li>如果这时候flush 线程单次flush还没有完成，会仍然持有锁，那么就会阻塞写入线程，直到完成。</li>
+<li>如果 flush完成了，那么会阻塞在<code>flush_cv_.wait(flush_lock,[this] { return !chunk_flush_-&gt;empty() || !is_writing_; });</code>。flush_cv_在 <code>wait()</code>的时候会短暂释放锁，那么写入线程就能获取锁，完成 swap 操作。之后通过 <code>notify_one</code>唤起 flush 线程继续工作。在要交换数据的时候，两个线程只能有一个工作，但是由于 swap 是一个耗时很短的操作，所以对整体影响不大，在其他时间里面，写入线程和 flush 线程都可以同时工作，提高了效率。</li>
+</ul>
+</li>
+<li>对于写入线程有两个条件可以判断是否需要 flush，分别是累积时间和chunk_size。在根据chunk_size来判断是否需要 flush 的时候使用了<code>in_writing_</code>变量，这个变量在flush 线程保存文件的时候会设置成 <code>true</code>，也就是如果 flush还在 flush，即使 chunk_size 超了，也不会触发 flush，而是会选择自发的累积。但是根据累积时间来判断的时候却没有使用<code>in_writing</code>这个变量。按道理加上也没问题，但是没有加，我觉得可能是出于以下的考虑：
+<ul>
+<li>自动驾驶数据通常按固定频率产生,这个系统能正常工作的前提是 flush 的速度超过写入的速度。所以综上两点，默认在一段时间内 flush 线程可以提前处理完所有数据。</li>
+<li>可以同时设置<code>chunk_interval</code>进行托底。如果的确某一个时间点数据出现了峰值，flush 线程来不及处理，数据可以先缓存在<code>chunk_active_</code>中，也即内存中。</li>
+</ul>
+</li>
+</ul>
+<h1 id="读取单个-record的实现">读取单个 Record的实现</h1>
+<p>之前已经讨论了写入一个Section的过程，读取的过程就是与之相反的过程，先读Section，这个的长度是固定的，然后根据读取的Section中<code>Size</code>读取后面的ProtoMessage进行反序列化：</p>
+<ul>
+<li>读取Section对应的是<code>bool RecordFileReader::ReadSection(Section* section)</code>。</li>
+<li>读取后面的ProtoMessage对应的函数是<code>bool RecordFileReader::ReadSection&lt;T&gt;(int64_t size, T* message)</code> 。<br>
+下面我将这两个函数摘录出来，并去掉一些不重要的代码。</li>
+</ul>
+<pre><code class="language-c++">bool RecordFileReader::ReadSection(Section* section) {
+  //return true：读取成功，false 表示读取失败
+  ssize_t count = read(fd_, section, sizeof(struct Section));
+  if (count &lt; 0) {//读取失败
+    return false;
+  } else if (count == 0) {//说明没有更多数据了，文件读完了。
+    end_of_file_ = true;
+    return false;
+  } else if (count != sizeof(struct Section)) {//读取失败
+    return false;
+  }
+  return true;//表示读取成功。
+}
+
+template &lt;typename T&gt;
+bool RecordFileReader::ReadSection(int64_t size, T* message) {
+  FileInputStream raw_input(fd_, static_cast&lt;int&gt;(size));//截取size长度的数据
+  CodedInputStream coded_input(&amp;raw_input);
+  CodedInputStream::Limit limit = coded_input.PushLimit(static_cast&lt;int&gt;(size));
+  //进行反序列化。得到Message，Message是Header、Channel或者Chubk等。
+  if (!message-&gt;ParseFromCodedStream(&amp;coded_input)) {
+    end_of_file_ = coded_input.ExpectAtEnd();
+    return false;
+  }
+  if (!coded_input.ConsumedEntireMessage()) {
+    AERROR &lt;&lt; &quot;Do not consumed entire message.&quot;;
+    return false;
+  }
+  coded_input.PopLimit(limit);
+  //得到的Message的长度和Section中记载的不一样，报错。
+  if (static_cast&lt;int64_t&gt;(message-&gt;ByteSizeLong()) != size) {
+    AERROR &lt;&lt; &quot;Message size is not consistent in section header&quot;
+           &lt;&lt; &quot;, expect: &quot; &lt;&lt; size &lt;&lt; &quot;, actual: &quot; &lt;&lt; message-&gt;ByteSizeLong();
+    return false;
+  }
+  return true;
+}
+</code></pre>
+<p>将上面两个函数组合起来就可以实现对于Record文件的连续读取。</p>
+<pre><code class="language-c++">bool RecordReader::ReadNextChunk(uint64_t begin_time, uint64_t end_time) {
+  bool skip_next_chunk_body = false;
+  while (!reach_end_) {
+    Section section;
+    //读取section
+    if (!file_reader_-&gt;ReadSection(&amp;section)) {
+      return false;
+    }
+    //根据section信息读取后面的Proto信息
+    switch (section.type) {
+      case SectionType::SECTION_INDEX: {
+        file_reader_-&gt;SkipSection(section.size);
+        reach_end_ = true;
+        break;
+      }
+      case SectionType::SECTION_CHANNEL: {
+        ADEBUG &lt;&lt; &quot;Read channel section of size: &quot; &lt;&lt; section.size;
+        Channel channel;
+        if (!file_reader_-&gt;ReadSection&lt;Channel&gt;(section.size, &amp;channel)) {
+          AERROR &lt;&lt; &quot;Failed to read channel section.&quot;;
+          return false;
+        }
+        break;
+      }
+      /*
+        省略后面相似的代码
+      */
+    }
+  }
+  return false;
+}
+</code></pre>
+<h1 id="多个-record的写入实现">多个 Record的写入实现</h1>
+<p>Record支持分Segment的功能，当满足一定条件后自动分文件写入，类似于压缩包分割，这样的好处有：</p>
+<ul>
+<li>方便传输，设想传输一个10G的文件，传输时间长，而且中途要是被打断重新传输的成本很高。</li>
+<li>提高容错率，其中一个文件出了问题，不影响其他文件。还是假设要录制10G的文件，如果最后出了错，那么这个10G的文件可能都无法使用了，但是如果分成10个1G的文件，那么前面9个1G的文件都还可以使用。<br>
+对于自动驾驶这个数据量级很大的行业，分Segment的这个功能还是蛮有必要的，以下是其主要的实现代码。</li>
+</ul>
+<pre><code class="language-c++">bool RecordWriter::WriteMessage(const SingleMessage&amp; message) {
+  std::lock_guard&lt;std::mutex&gt; lg(mutex_);//加上锁，多线程安全、
+  OnNewMessage(message.channel_name());
+  if (!file_writer_-&gt;WriteMessage(message)) {//写入message
+    AERROR &lt;&lt; &quot;Write message is failed.&quot;;
+    return false;
+  }
+
+  segment_raw_size_ += message.content().size();//更新 segment_size
+  if (segment_begin_time_ == 0) {//更新segment_begin_time_
+    segment_begin_time_ = message.time();
+  }
+  if (segment_begin_time_ &gt; message.time()) {
+    segment_begin_time_ = message.time();
+  }
+
+  if ((header_.segment_interval() &gt; 0 &amp;&amp;//判断是否满足分 segment 的条件
+       message.time() - segment_begin_time_ &gt; header_.segment_interval()) ||
+      (header_.segment_raw_size() &gt; 0 &amp;&amp;
+       segment_raw_size_ &gt; header_.segment_raw_size())) {
+    file_writer_backup_.swap(file_writer_);
+    file_writer_backup_-&gt;Close();
+    if (!SplitOutfile()) {//具体分 segment 的实现
+      AERROR &lt;&lt; &quot;Split out file is failed.&quot;;
+      return false;
+    }
+  }
+  return true;
+}
+</code></pre>
+<pre><code class="language-c++">bool RecordWriter::SplitOutfile() {
+  file_writer_.reset(new RecordFileWriter());//为新record创建file_writer
+  if (file_index_ &gt; 99999) {
+    AWARN &lt;&lt; &quot;More than 99999 record files had been recored, will restart &quot;
+          &lt;&lt; &quot;counting from 0.&quot;;
+    file_index_ = 0;
+  }
+  sstream_.str(std::string());
+  sstream_.clear();
+  sstream_ &lt;&lt; &quot;.&quot; &lt;&lt; std::setw(5) &lt;&lt; std::setfill('0') &lt;&lt; file_index_++ &lt;&lt; &quot;.&quot;;
+  path_ = file_ + sstream_.str() +//根据规则生成名称
+          UnixSecondsToString(time(nullptr), &quot;%Y%m%d%H%M%S&quot;);
+  segment_raw_size_ = 0;
+  segment_begin_time_ = 0;
+  if (!file_writer_-&gt;Open(path_)) {//根据名称创建record
+    AERROR &lt;&lt; &quot;Failed to open record file: &quot; &lt;&lt; path_;
+    return false;
+  }
+  if (!file_writer_-&gt;WriteHeader(header_)) {//写入缓存的Header信息
+    AERROR &lt;&lt; &quot;Failed to write header for record file: &quot; &lt;&lt; path_;
+    return false;
+  }
+  for (const auto&amp; i : channel_message_number_map_) {//写入缓存的channel信息
+    Channel channel;
+    channel.set_name(i.first);
+    channel.set_message_type(channel_message_type_map_[i.first]);
+    channel.set_proto_desc(channel_proto_desc_map_[i.first]);
+    if (!file_writer_-&gt;WriteChannel(channel)) {
+      AERROR &lt;&lt; &quot;Failed to write channel for record file: &quot; &lt;&lt; path_;
+      return false;
+    }
+  }
+  return true;
+}
+</code></pre>
+<p>思路比较直接，之前一直缓存 Header 和 Channel 信息，在写入消息的过程中不断地判断是否满足创建新 segment 的条件，当满足条件的时候，先保存当前 Record，然后根据规则，确定新的 Record的名称，同时创建新的<code>record_file_writer</code>并将之前缓存的 Header 和 Channel 信息写入到新Record中，之后新的消息也直接写入新的Record中。</p>
+<h1 id="读取多个-record-的实现">读取多个 Record 的实现</h1>
+<p>Record 格式有分Segment 的功能，即将一段连续数据分成多个 Record 保存，对应地也有自动读取多个相关联 Record 地功能，这个的实现主要是在<code>record_viewer.cc</code>，<code>RecordViewer</code>既支持单个 Record，也支持多个 Record，这里只讨论多个 Record 的，因为前者相对于后者是更简单的情况。<br>
+思路是封装出了一个统一的迭代器接口，具体来说：</p>
+<ol>
+<li>复用之前的<code>RecordReader</code>,为每一个Record 创建一个<code>RecordReader</code>负责读取。</li>
+<li>根据每一个 Record 中Header 存储的<code>begin_time()</code>进行排序，按照升序排列。</li>
+<li>排序完成后从最开始的 Record 进行读取，将读取的数据放到一个 buffer 中，同时创建一个迭代器，每次迭代器都从buffer 中获取数据，迭代器更新的的时候，buffer 对应更新。</li>
+</ol>
+<p>buffer 的定义如下<code>std::multimap&lt;uint64_t, std::shared_ptr&lt;RecordMessage&gt;&gt; </code>。 使用的数据结构是multimap，有以下特点：</p>
+<ul>
+<li>key可以相同，因为有可能有两个消息的时间戳就是相同的，所以没有使用<code>std::map</code></li>
+<li><code>std::multimap</code>是自排序的，能够保证时间顺序。</li>
+</ul>
+<p>关键代码：</p>
+<ul>
+<li>
+<p>对传进来的reader按照<code>begin_time()</code>进行排序：</p>
+<pre><code class="language-C++">  std::sort(readers_.begin(), readers_.end(),
+          [](const RecordReaderPtr&amp; lhs, const RecordReaderPtr&amp; rhs) {
+            const auto&amp; lhs_header = lhs-&gt;GetHeader();
+            const auto&amp; rhs_header = rhs-&gt;GetHeader();
+            if (lhs_header.begin_time() == rhs_header.begin_time()) {
+              return lhs_header.end_time() &lt; rhs_header.end_time();
+            }
+            return lhs_header.begin_time() &lt; rhs_header.begin_time();
+          });
+</code></pre>
+</li>
+<li>
+<p>更新buffer:</p>
+<pre><code class="language-c++">bool RecordViewer::FillBuffer() {
+while (curr_begin_time_ &lt;= end_time_ &amp;&amp; msg_buffer_.size() &lt; kBufferMinSize) {
+    uint64_t this_begin_time = curr_begin_time_;
+    uint64_t this_end_time = this_begin_time + kStepTimeNanoSec;//kStepTimeNanoSec是1s，也就是每次读取1s的内容。
+    if (this_end_time &gt; end_time_) {
+    this_end_time = end_time_;
+    }
+
+    //根据当前时间戳来判断这个reader是否已经读过
+    for (size_t i = 0; i &lt; readers_.size(); ++i) {
+    if (!readers_finished_[i] &amp;&amp;
+        readers_[i]-&gt;GetHeader().end_time() &lt; this_begin_time) {
+        readers_finished_[i] = true;
+        readers_[i]-&gt;Reset();
+    }
+    }
+    //找到有效的reader读取数据并放到buffer中。
+    for (size_t i = 0; i &lt; readers_.size(); ++i) {
+    if (readers_finished_[i]) {
+        continue;
+    }
+    auto&amp; reader = readers_[i];
+    while (true) {
+        auto record_msg = std::make_shared&lt;RecordMessage&gt;();
+        if (!reader-&gt;ReadMessage(record_msg.get(), this_begin_time,
+                                this_end_time)) {
+        break;
+        }
+        msg_buffer_.emplace(std::make_pair(record_msg-&gt;time, record_msg));
+    }
+    }
+
+    // because ReadMessage of RecordReader is closed interval, so we add 1 here
+    curr_begin_time_ = this_end_time + 1;
+}
+
+return !msg_buffer_.empty();
+}
+</code></pre>
+</li>
+<li>
+<p>对迭代器的封装：</p>
+<pre><code class="language-c++">RecordViewer::Iterator&amp; RecordViewer::Iterator::operator++() {
+index_++;
+//迭代器递增的时候，调用Update函数，更新底层实际的值。
+if (!viewer_-&gt;Update(&amp;message_instance_)) {
+    end_ = true;
+}
+return *this;
+}
+//对于迭代器-&gt; 操作符的实现
+RecordViewer::Iterator::pointer RecordViewer::Iterator::operator-&gt;() {
+return &amp;message_instance_;
+}
+//对于迭代器* 操作符的实现
+RecordViewer::Iterator::reference RecordViewer::Iterator::operator*() {
+return message_instance_;
+}
+
+bool RecordViewer::Update(RecordMessage* message) {
+bool find = false;
+do {
+    //如果buffer为空，就更新buffer，也就是获取1s时长的数据。
+    if (msg_buffer_.empty() &amp;&amp; !FillBuffer()) {
+    break;
+    }
+    //直接获取buffer最开始的数据返回。
+    auto&amp; msg = msg_buffer_.begin()-&gt;second;
+    if (channels_.empty() || channels_.count(msg-&gt;channel_name) == 1) {
+    *message = *msg;
+    find = true;
+    }
+    msg_buffer_.erase(msg_buffer_.begin());//清除已经获取的数据
+} while (!find);
+
+return find;
+}
+</code></pre>
+</li>
+</ul>
+<p>总的来说是是一个十分巧妙的实现：</p>
+<ul>
+<li>通过迭代器将多个Record文件的读取封装成了统一的接口。用户不需要关心是从一个文件还是从多个文件读取数据，API接口始终保持一致。</li>
+<li>通过buffer进行缓存，相当于创建了一个滑动窗口，实现了懒加载，避免了一次性加载所有数据导致的内存压力，同时保持了高效访问。</li>
+</ul>
+<h1 id="总结与展望">总结与展望</h1>
+<p>现在完成了对于Record格式基础的学习，还有一些关于Record的周边功能，比如：</p>
+<ul>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recoverer.cc">recoverer</a>负责重建缺失的Index</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/spliter.cc">splitter</a>负责切分Record</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recorder.cc">recorder</a>负责从CyberRT中将数据录制成Record</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/info.cc">info</a>负责打印Record的基本信息。</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/python/cyber_py3/record.py">Record API的Python封装</a>，负责提供Python接口， 自己使用Pybind11也实现过相同的功能。</li>
+</ul>
+<p>以上功能都是基于基础的数据结构来实现的。理解了基础的数据结构和读写操作，理解这些并不麻烦。<br>
+读完了这个Record里面的代码，自己感觉收获良多，完成了从知其然到知其所以然的进步，里面许多巧妙的设计，比如整体的数据结构，对于并发写入的实现，迭代器的封装。我相信都是很好的设计，到现在也有借鉴意义。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[自己实现一个 Tuple]]></title>
+        <id>https://WatsonShum.github.io/post/zi-ji-shi-xian-yi-ge-tuple/</id>
+        <link href="https://WatsonShum.github.io/post/zi-ji-shi-xian-yi-ge-tuple/">
+        </link>
+        <updated>2025-03-19T07:22:07.000Z</updated>
+        <content type="html"><![CDATA[<p>C++ Template 是一项很有意思的技术，自己之前对于基本概念，比如 template method、variadic template、partial specialization 等都已经有了基础的掌握，最近发现了一个更加 advanced 的<a href="https://www.youtube.com/watch?v=VBI6TSo8Zog&amp;list=PLWxziGKTUvQFIsbbFcTZz7jOT4TMGnZBh">教程</a>，初步学习后感觉受益匪浅，对于其中的知识点想详细记录。<br>
+这个教程的最终结果是自己实现 std 中的 Tuple，并实现一些常用的功能，比如：</p>
+<ul>
+<li>empty</li>
+<li>size</li>
+<li>contains</li>
+<li>any</li>
+<li>front</li>
+<li>back</li>
+<li>at</li>
+<li>push_back</li>
+<li>pop_back</li>
+<li>transform</li>
+<li>filter</li>
+<li>cat</li>
+<li>...</li>
+</ul>
+<h1 id="empty">empty</h1>
+<p>empty函数的作用是检测<code>Tuple</code>里面是否有元素。</p>
+<pre><code class="language-c++">/*不那么通用的写法
+template &lt;typename TUPLE&gt;
+struct empty: std::false_type {};
+
+template &lt;typename TUPLE&gt;
+struct empty&lt;Tuple&lt;&gt;&gt; : std::true_type {};
+*/
+
+template &lt;typename LIST&gt;
+struct empty : std::false_type {};
+
+template &lt;template &lt;typename...&gt; class LIST&gt;
+struct empty&lt;LIST&lt;&gt;&gt; : std::true_type {};
+
+template &lt;typename LIST&gt;//别名
+static constexpr bool empty_v = empty&lt;LIST&gt;::value;
+
+//使用方法：
+empty_v&lt;type_list&lt;&gt;&gt;
+</code></pre>
+<p>有以下几点值得注意：</p>
+<ul>
+<li>使用了模板特化，主模板继承自<code>std::false_type {}</code>，value 会自动为 false。偏特化模板匹配了为空的情况，继承自<code>std::true_type</code>，value自动为 true。</li>
+<li>使用了 template template parameter，即将模板作为另一个模板的参数，好处是提高了泛用性。可以兼容自己写的<code>Tuple</code>，也可以兼容 <code>std::tuple</code>。</li>
+<li>定义了一个别名来简化代码和提高可读性。使用了 static 保证了当前变量局限在当前的编译单元，避免了全局符号冲突。</li>
+</ul>
+<h1 id="front">front</h1>
+<p>类似于 <code>std::vector</code> 中的 <code>front()</code>用来获取开头的元素类型。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;//辅助类， 用来被其他类继承，从而快速定义 type
+struct has_type {
+	using type = T;
+};
+
+template &lt;typename LIST&gt;//声明
+struct front;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename... T1toN&gt;
+struct front&lt;LIST&lt;T0, T1toN...&gt;&gt; : has_type&lt;T0&gt; {};//特化
+
+template &lt;typename LIST&gt;
+using front_t = typename front&lt;LIST&gt;::type;//别名
+</code></pre>
+<p>有以下几点值得注意：</p>
+<ul>
+<li>定义了 has_type<T>这个一个辅助struct，其他 struct 继承这个 struct 就可以创建一个类型成员。由于 struct 继承默认的关系是 public，所以不需要手动<code>public</code>修饰符。由于子类没有定义 type，所以不会出现 Name Hiding。</li>
+<li>将 template template parameter 和 variadic parameter 结合使用，用来匹配第一个元素。</li>
+<li>第一个声明如果去掉也不影响功能，只是为了创建别名语法更加方便。</li>
+</ul>
+<h1 id="pop_front">pop_front</h1>
+<p>和 <code>std::vector</code> 中的 <code>pop_front</code> 不一样的是，返回的不是被 pop 的第一个元素，而是返回剩下的元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST&gt;
+struct pop_front;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename... T1toN&gt;
+struct pop_front&lt;LIST&lt;T0, T1toN...&gt;&gt; : has_type&lt;LIST&lt;T1toN...&gt;&gt; {};
+
+template &lt;typename LIST&gt;
+using pop_front_t = typename pop_front&lt;LIST&gt;::type;
+</code></pre>
+<p>整个实现过程和前面的 <code>front&lt;T&gt;</code>十分类似，唯一有差别的地方是利用<code>has_type&lt;LIST&lt;T1toN...&gt;&gt;</code>返回剩下的元素。</p>
+<h1 id="back">back</h1>
+<p>和 <code>std::vector</code> 的 <code>back()</code>类似，返回最后一个元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST&gt;//主模板，利用了递归
+struct back : has_type&lt;typename back&lt;pop_front_t&lt;LIST&gt;&gt;::type&gt; {};
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0&gt;//特化
+struct back&lt;LIST&lt;T0&gt;&gt; : has_type&lt;T0&gt; {};
+
+template &lt;typename LIST&gt;//别名
+using back_t = typename back&lt;LIST&gt;::type;
+</code></pre>
+<p>实现的原理如下：</p>
+<ul>
+<li>
+<p>主模板使用了递归，不断地调用 <code>back&lt;T&gt;</code>，每次调用的时候使用之前实现的<code>pop_front_t</code>去掉开头的元素。</p>
+</li>
+<li>
+<p>偏特化模板定义了递归的 base case，当递归到这种情况的时候会自动停止。也就是当只有一个元素的时候，直接返回该元素。因为之前的元素都被 pop 掉了，所以该元素就是符合要求的元素。</p>
+</li>
+</ul>
+<p>值得注意的是，为什么不写成下面这样？</p>
+<pre><code class="language-c++">template &lt;template &lt;typename...&gt; class LIST, typename... T0toN_1, typename TN&gt;//特化
+struct back&lt;LIST&lt;T0toN_1...,TN&gt;&gt; : has_type&lt;TN&gt; {};
+</code></pre>
+<p>因为匹配规则是<code>T0toN_1...</code>很贪婪，会匹配完所有元素，导致最后 <code>TN</code>没有能匹配的元素，从而编译报错，所以写成这样不能达到目的。</p>
+<h1 id="push-back">push back</h1>
+<pre><code class="language-c++">template &lt;typename LIST, typename T&gt;//主模板
+struct push_back;
+
+template &lt;template &lt;typename...&gt; class LIST, typename... T0toN, typename T&gt;//特化
+struct push_back&lt;LIST&lt;T0toN...&gt;, T&gt; : has_type&lt;LIST&lt;T0toN..., T&gt;&gt; {};
+
+template &lt;typename LIST, typename T&gt;//别名
+using push_back_t = typename push_back&lt;LIST, T&gt;::type;
+</code></pre>
+<p>和前面相比，实现的逻辑很简单，就是将后面的元素添加到后面。</p>
+<h1 id="pop_back">pop_back</h1>
+<p>和 <code>std::vector</code> 的 <code>pop_back</code> 不同，返回的是 pop 后剩下的元素。</p>
+<pre><code class="language-c++">template &lt;typename LIST, typename RET_LIST = make_same_container_t&lt;type_list&lt;&gt;, LIST&gt;&gt;
+struct pop_back;
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename RET_LIST&gt;
+struct pop_back&lt;LIST&lt;T0&gt;, RET_LIST&gt; : has_type&lt;RET_LIST&gt; {};
+
+template &lt;template &lt;typename...&gt; class LIST, typename T0, typename T1, typename... T2toN, typename RET_LIST&gt;
+struct pop_back&lt;LIST&lt;T0, T1, T2toN...&gt;, RET_LIST&gt; : pop_back&lt;LIST&lt;T1, T2toN...&gt;, push_back_t&lt;RET_LIST, T0&gt;&gt; {};
+
+template &lt;typename LIST&gt;
+using pop_back_t = typename pop_back&lt;LIST&gt;::type;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>
+<p>创建了一个 <code>RET_LIST</code>作为变量构造返回值，利用递归来构造<code>RET_LIST</code>，在一次递归中将原始 LIST 将最前面的元素去掉，将这个元素加入到<code>RET_LIST</code>的最后面。类似于两个 queue 转移元素。递归结束的 base case 是当原始 LIST 只有一个元素的时候，返回 <code>RET_LIST</code>，这时候<code>RET_LIST</code>就是 pop 掉最后一个元素后剩下的其他元素。</p>
+</li>
+<li>
+<p>使用 default template parameter，它的用法和函数的默认参数一样，<code>typename RET_LIST = make_same_container_t&lt;type_list&lt;&gt;, LIST&gt;</code>在不显示指定的情况下，使用默认值。其实现原理如下：</p>
+<pre><code class="language-c++">template &lt;typename FROM_LIST, typename TO_LIST&gt;
+struct make_same_container;
+
+template &lt;template &lt;typename...&gt; class LIST,
+          typename... ELEMS,
+          template &lt;typename...&gt;
+          class TO_LIST,
+          typename... ELEMS2&gt;
+struct make_same_container&lt;LIST&lt;ELEMS...&gt;, TO_LIST&lt;ELEMS2...&gt;&gt; : has_type&lt;TO_LIST&lt;ELEMS...&gt;&gt; {};
+</code></pre>
+<p>在上面的用法中作用是创建了一个空的LIST，用作<code>RET_LIST</code>的初始值。</p>
+</li>
+</ul>
+<h1 id="at">at</h1>
+<p>支持根据索引来获取元素类型。</p>
+<pre><code class="language-c++">template &lt;typename LIST, size_t index&gt;//主模板，利用了递归
+struct at : has_type&lt;typename at&lt;pop_front_t&lt;LIST&gt;, index - 1&gt;::type&gt; {};
+
+template &lt;typename LIST&gt;//偏特化，递归的 base case
+struct at&lt;LIST, 0&gt; : has_type&lt;front_t&lt;LIST&gt;&gt; {};
+
+template &lt;typename LIST, size_t index&gt;//别名
+using at_t = typename at&lt;LIST, index&gt;::type;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>利用了递归，每次递归将 <code>index</code>减一，直到 <code>index</code> 为 0 的时候，使用之前之前实现的 <code>front_t</code>来获取目标元素。</li>
+</ul>
+<h1 id="any">any</h1>
+<p>any 操作指的是如果有一个元素满足条件，就返回 true，否则返回 false。用法：<code>any_v&lt;std::is_integral, type_list&lt;int, double, std::string&gt;&gt;</code></p>
+<pre><code class="language-c++">template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;
+struct any;
+
+template &lt;template &lt;typename&gt; class PREDICATE, template &lt;typename...&gt; class LIST&gt;//模板偏特化
+struct any&lt;PREDICATE, LIST&lt;&gt;&gt; : std::false_type {};
+
+template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;//主模板
+struct any : if_&lt;  // if predicate matches first type
+                 PREDICATE&lt;front_t&lt;LIST&gt;&gt;::value,
+                 // then
+                 std::true_type,
+                 // else
+                 typename any&lt;PREDICATE, pop_front_t&lt;LIST&gt;&gt;::type&gt;::type {};
+
+template &lt;template &lt;typename&gt; class PREDICATE, typename LIST&gt;//别名
+static constexpr bool any_v = any&lt;PREDICATE, LIST&gt;::value;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>主模板使用了递归，利用类似于三目运算符的 <code>if_</code>，首先利用 <code>front_t</code>来获取最前面的元素，如果条件满足，返回<code>std::true_type</code>,如果条件不满足，利用<code>pop_front_t</code>去掉最前面的元素后继续递归。</li>
+<li>偏特化提供了递归的 base case，也就是当 <code>LIST</code>为空的时候，返回<code>std::false_typ</code>。</li>
+<li>由于编译器并不确定<code>any&lt;PREDICATE, pop_front_t&lt;LIST&gt;&gt;::type&gt;::type</code>是 value 还是 type，默认的情况下会将其当作 value，所以需要加上 <code>typename</code> 关键字。</li>
+</ul>
+<p><code>三目运算符</code>的实现逻辑也十分简单，就是两个偏特化。</p>
+<pre><code class="language-c++">template &lt;bool condition, typename THEN, typename ELSE&gt;
+struct if_;
+
+template &lt;typename THEN, typename ELSE&gt;//偏特化
+struct if_&lt;true, THEN, ELSE&gt; : has_type&lt;THEN&gt; {};
+
+template &lt;typename THEN, typename ELSE&gt;//偏特化
+struct if_&lt;false, THEN, ELSE&gt; : has_type&lt;ELSE&gt; {};
+</code></pre>
+<h1 id="contains_type">contains_type</h1>
+<p>判断是否含有某个 type。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;
+struct same_as_pred {
+	template &lt;typename U&gt;
+	struct predicate : std::is_same&lt;T, U&gt; {};
+};
+
+template &lt;typename SEARCH, typename LIST&gt;
+static constexpr bool contains_type_v = any&lt;same_as_pred&lt;SEARCH&gt;::template predicate, LIST&gt;::value;
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>借助之前实现的 <code>any</code>，自定义 PREDICATE 就可以了。可以使用 <code>std::is_same&lt;T, U&gt;</code>来判断当前元素是否和目标元素类型相同。但是 <code>any</code>中的 PREDICTATE只支持一个元素，所以我们进行一层封装，在 struct 里面再次嵌套 struct 解决了这个问题。</li>
+<li>由于编译器不确定<code>predicate</code>是<code>same_as_pred</code>的一个 value 还是 type。默认会当作 value，所以需要在使用的时候加上 typename，<code>same_as_pred&lt;SEARCH&gt;::template predicate</code>。</li>
+</ul>
+<h1 id="tuple_size">tuple_size</h1>
+<p>类似于 <code>std::vector</code> 的 <code>size()</code>。</p>
+<pre><code class="language-c++">template &lt;typename TUPLE&gt;//主模板声明
+struct tuple_size;
+template &lt;template &lt;typename...&gt; class Tuple,typename... ELEMS&gt;//特化
+struct tuple_size&lt;Tuple&lt;ELEMS...&gt;&gt; : std::integral_constant&lt;size_t, sizeof...(ELEMS)&gt; {};
+
+template &lt;typename TUPLE&gt;
+static constexpr size_t tuple_size_v = tuple_size&lt;TUPLE&gt;::value;//别名
+</code></pre>
+<ul>
+<li>使用了<code>sizeof...</code>操作符来获取 paramter pack 的元素个数</li>
+<li>继承自<code>std::integral_constant</code>，这样就可以自动创建一个 <code>value</code>成员变量。</li>
+</ul>
+<h1 id="tuple-数据结构">Tuple 数据结构</h1>
+<p>Tuple 是一种 异构的数据结构，即它里面的每一个元素的类型是可以不同的。对于 Tuple 的数据结构有两种实现方式，第一种方式是recursive inheritance。第二种是 multiple inheritance。视频中使用的方式是前者。<br>
+recursive inheritance 的基本原理是每次只表示最前面的一个元素，然后继承一个更小的 Tuple，直到只剩下一个元素。</p>
+<pre><code class="language-c++">template &lt;typename... ELEMS&gt;//主模板，主要用来处理为空的情况
+struct Tuple {
+	constexpr Tuple() = default;
+};
+
+template &lt;typename ELEM0, typename... ELEMS1toN&gt;
+struct Tuple&lt;ELEM0, ELEMS1toN...&gt; : Tuple&lt;ELEMS1toN...&gt; {//偏特化、被优先使用，处理至少有一个参数，继承更小的Tuple
+	template &lt;typename T, typename... Ts&gt;
+	explicit constexpr Tuple(T&amp;&amp; e1, Ts&amp;&amp;... rest);//构造函数，使用 member initializer 进行初始化
+	    : Tuple&lt;ELEMS1toN...&gt;(std::forward&lt;Ts&gt;(rest)...)// 调用基类进行初始化
+	    , data(std::forward&lt;T&gt;(e1)) {}//data 存储最前面的值
+	ELEM0 data;
+};
+</code></pre>
+<p>以 <code>Tuple&lt;int, char, double&gt; t(1, 'a', 3.14);</code>为例最终会形成如下的结构：</p>
+<pre><code class="language-c++">Tuple&lt;int, char, double&gt;  // 最外层
+    : Tuple&lt;char, double&gt;  // 中间层
+        : Tuple&lt;double&gt;    // 内层
+            : Tuple&lt;&gt;      // 最内层
+</code></pre>
+<p>有以下值得注意的点：</p>
+<ul>
+<li>
+<p>提供了一个主模板和偏特化，偏特化会优先使用，只有偏特化覆盖不了的地方，例如 Tuple 为空的情况才会使用主模板。</p>
+</li>
+<li>
+<p>使用了继承，对于对象不是虚函数，所以不存在多态，对于名称相同的类成员，规则是Name Hiding 和 Scope Rules。访问基类的方式是:</p>
+<pre><code class="language-c++">// 访问不同层级的data成员：
+t.data;                    // 访问最外层(int)的data
+t.Tuple&lt;char, double&gt;::data;  // 使用作用域解析运算符访问中间层(char)的data
+t.Tuple&lt;double&gt;::data;        // 使用作用域解析运算符访问内层(double)的data
+</code></pre>
+<p>现在已经可以 declare and define 一个 Tuple了，但是必须要显示地指明每一个元素的类型。<code>Tuple&lt;int, char, double&gt; t(1, 'a', 3.14);</code>我们可以添加一个 deduction guide用来自动推导。</p>
+</li>
+</ul>
+<pre><code class="language-c++">template &lt;typename T, typename... Ts&gt;
+Tuple(T e1, Ts... rest) -&gt; Tuple&lt;std::unwrap_ref_decay_t&lt;T&gt;, std::unwrap_ref_decay_t&lt;Ts&gt;...&gt;;?
+/*unwrap_ref_decay_t的作用：
+1. 移除引用
+2. 移除const/volatile限定符
+3. 将数组转换为指针
+4. 将函数类型转换为函数指针。
+*、
+</code></pre>
+<p>这样<code>Tuple t2(1, const int(2),int&amp;(x));</code> 会被自动推导为<code>Tuple&lt;int, int,int&gt;</code></p>
+<h1 id="forward_as_tuple">forward_as_tuple</h1>
+<p>作用是将parameter pack 变成一个 Tuple。</p>
+<pre><code class="language-c++">template &lt;typename... Ts&gt;
+constexpr auto forward_as_tuple(Ts&amp;&amp;... ts) noexcept {
+	return Tuple&lt;Ts&amp;&amp;...&gt;{std::forward&lt;Ts&gt;(ts)...};
+}
+</code></pre>
+<p>为什么不直接使用 这样的形式来构建<code>Tuple{ts...}</code>，因为之前定义了 deduction guide，直接使用这种形式会造成类型的退化，但是使用<code>Tuple&lt;Ts&amp;&amp;...&gt;{std::forward&lt;Ts&gt;(ts)...};</code>这样的形式，就能够完整地保留类型信息。</p>
+<pre><code class="language-c++">int x = 1;
+const int&amp; y = x;
+
+// 直接创建Tuple会丢失引用关系
+Tuple{x, y}  // 类型是 Tuple&lt;int, int&gt;
+
+// 使用forward_as_tuple保持引用关系
+forward_as_tuple(x, y)  // 类型是 Tuple&lt;int&amp;, const int&amp;&gt;
+</code></pre>
+<h1 id="get">get</h1>
+<p>类似于 <code>std::get&lt;index&gt;()</code>可以传入索引来获取 Tuple 的值，同时该支持赋值 ，例如<code>get&lt;1&gt;(tuple)=1</code>。</p>
+<pre><code class="language-c++">namespace detail {
+template &lt;size_t i, typename TUPLE&gt;//主模板
+struct get_impl : get_impl&lt;i - 1, pop_front_t&lt;TUPLE&gt;&gt; {};
+
+template &lt;typename TUPLE&gt;
+struct get_impl&lt;0, TUPLE&gt; {//特化
+	template &lt;typename T&gt;
+	constexpr static decltype(auto) get(T&amp;&amp; t) {
+		constexpr bool is_lvalue = std::is_lvalue_reference_v&lt;T&gt;;
+		constexpr bool is_const = std::is_const_v&lt;std::remove_reference_t&lt;T&gt;&gt;;
+		using data_t = front_t&lt;TUPLE&gt;;
+
+		if constexpr (is_lvalue &amp;&amp; is_const) {
+			return static_cast&lt;const data_t&amp;&gt;(static_cast&lt;const TUPLE&amp;&gt;(t).data);
+		}
+		if constexpr (is_lvalue &amp;&amp; !is_const) {
+			return static_cast&lt;data_t&amp;&gt;(static_cast&lt;TUPLE&amp;&gt;(t).data);
+		}
+		if constexpr (!is_lvalue &amp;&amp; is_const) {
+			return static_cast&lt;const data_t&amp;&amp;&gt;(static_cast&lt;const TUPLE&amp;&amp;&gt;(t).data);
+		}
+		if constexpr (!is_lvalue &amp;&amp; !is_const) {
+			return static_cast&lt;data_t&amp;&amp;&gt;(static_cast&lt;TUPLE&amp;&amp;&gt;(t).data);
+		}
+	}
+};
+}  // namespace detail
+
+template &lt;size_t i, typename TUPLE&gt;
+constexpr decltype(auto) get(TUPLE&amp;&amp; tuple) {
+	return detail::get_impl&lt;i, std::remove_cvref_t&lt;TUPLE&gt;&gt;::get(std::forward&lt;TUPLE&gt;(tuple));
+}
+</code></pre>
+<ul>
+<li>使用了<code>decltype(auto)</code>，相比于<code>auto</code>可以保留 const 和 引用等信息，保留引用可以之后实现赋值功能。</li>
+<li>实现了完美转发来减少复制和保留类型信息。</li>
+<li>主模板使用了递归，每次递归都将所以减1，偏特化提供了递归的 base case，就是当所以为 0 的时候，获取当前模板的 <code>data</code>成员变量，就是当前索引位置的值。</li>
+<li>获取了当前 <code>Tuple</code> 的类型信息，比如是lvalue、还是 rvalue，是否为 const，对应的将返回的值进行 static_cast。也就是得到值的类型和 <code>Tuple</code>的类型一致。</li>
+<li>使用了<code>std::remove_cvref_t</code>将<code>TUPLE</code>变成了一个裸类型，避免因为引用和限定符导致模板特化失败。但是在返回值的时候又将类型加了回去。</li>
+</ul>
+<h1 id="transfrom">transfrom</h1>
+<p>类似于 <code>std::transfrom</code>，但是是作用在 <code>Tuple</code> 上面。</p>
+<pre><code class="language-c++">namespace detail {
+template &lt;typename TUP, typename FUNC, size_t... indices&gt;
+constexpr auto transform_impl(TUP&amp;&amp; tup, const FUNC&amp; f, std::index_sequence&lt;indices...&gt;) {
+	return Tuple{f(get&lt;indices&gt;(std::forward&lt;TUP&gt;(tup)))...};
+}
+}  // namespace detail
+
+template &lt;typename TUP, typename FUNC&gt;
+constexpr auto transform(TUP&amp;&amp; tup, const FUNC&amp; f) {
+	return detail::transform_impl(std::forward&lt;TUP&gt;(tup),
+	                              f,
+	                              std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUP&gt;&gt;&gt;{});
+}
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>使用<code>std::make_index_sequence</code>结合 之前实现的<code>tuple_size_v</code>，创建了{0...size-1}的 index sequence。</li>
+<li>然后使用之前实现的<code>get&lt;indices&gt;()</code>获取每一个元素的值，然后作为参数传入 <code>FUNC&amp;</code>，<code>FUNC&amp;</code>执行完返回另外一个值，使用 fold expression <code>...</code>批量执行这个操作，所有元素会组成一个新的 <code>Tuple</code>。</li>
+<li>使用完美转发减少 <code>Tuple</code> 的复制。</li>
+</ul>
+<p>用法：</p>
+<pre><code class="language-c++">		Tuple tup{42, 'c', 12U};
+		auto tup2 = transform(std::forward&lt;decltype(tup)&gt;(tup), []&lt;typename T&gt;(T &amp;&amp;t) {
+			constexpr bool is_integral = std::is_integral_v&lt;std::remove_cvref_t&lt;T&gt;&gt;;
+			if constexpr (is_integral) {
+				return int(t) + 2;
+			} else {
+				return t;
+			}
+		});
+//结果{44,'c',14}
+</code></pre>
+<h1 id="tuple_cat">tuple_cat</h1>
+<p>作用是将多个 <code>Tuple</code>合并成一个。</p>
+<pre><code class="language-c++">namespace detail {
+
+template &lt;typename INDEX_SEQ&gt;
+struct make_tuple_from_fwd_tuple;
+
+template &lt;size_t... indices&gt;
+struct make_tuple_from_fwd_tuple&lt;std::index_sequence&lt;indices...&gt;&gt; {//基于 Tuple 创建一个新的 Tuple。
+	template &lt;typename FWD_TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd) {
+		return Tuple{get&lt;indices&gt;(std::forward&lt;FWD_TUPLE&gt;(fwd))...};
+	}
+};
+
+template &lt;typename FWD_INDEX_SEQ, typename TUPLE_INDEX_SEQ&gt;
+struct concat_with_fwd_tuple;
+
+template &lt;size_t... fwd_indices, size_t... indices&gt;//合并两个 Tuple
+struct concat_with_fwd_tuple&lt;std::index_sequence&lt;fwd_indices...&gt;, std::index_sequence&lt;indices...&gt;&gt; {
+	template &lt;typename FWD_TUPLE, typename TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd, TUPLE&amp;&amp; t) {
+		return forward_as_tuple(get&lt;fwd_indices&gt;(std::forward&lt;FWD_TUPLE&gt;(fwd))..., get&lt;indices&gt;(std::forward&lt;TUPLE&gt;(t))...);
+	}
+};
+
+struct tuple_cat_impl {
+	template &lt;typename FWD_TUPLE, typename TUPLE, typename... TUPLES&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; fwd, TUPLE&amp;&amp; t, TUPLES&amp;&amp;... ts) {//进行递归
+		return f(concat_with_fwd_tuple&lt;
+		             std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;FWD_TUPLE&gt;&gt;&gt;,
+		             std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUPLE&gt;&gt;&gt;&gt;::f(std::forward&lt;FWD_TUPLE&gt;(fwd),
+		                                                                                    std::forward&lt;TUPLE&gt;(t)),
+		         std::forward&lt;TUPLES&gt;(ts)...);
+	}
+
+	template &lt;typename FWD_TUPLE&gt;
+	static constexpr auto f(FWD_TUPLE&amp;&amp; ret) {//递归的 base case
+		return make_tuple_from_fwd_tuple&lt;std::make_index_sequence&lt;tuple_size_v&lt;FWD_TUPLE&gt;&gt;&gt;::f(
+		    std::forward&lt;FWD_TUPLE&gt;(ret));
+	}
+};
+
+}  // namespace detail
+
+template &lt;typename... TUPLES&gt;
+constexpr auto tuple_cat(TUPLES&amp;&amp;... tuples) {
+	return detail::tuple_cat_impl::f(std::forward&lt;TUPLES&gt;(tuples)...);
+}
+</code></pre>
+<p>实现的原理：</p>
+<ul>
+<li>还是利用递归的思路，创建了一个<code>FWD_TUPLE</code>，<code>FWD_TUPLE</code>的初始值是第一个<code>TUPLE</code>，然后使用<code>concat_with_fwd_tuple&lt;T,U&gt;::f(fwd,t)</code>函数将两个 <code>Tuple</code> 合并，这个函数的返回值是合并后的<code>Tuple</code>，不断地递归重复这种过程，直到遇见 base case，那就是只剩下一个<code>Tuple</code>地时候，这个时候就是所有<code>Tuple</code>合并完毕后的值。整个的逻辑过程，类似于合并多条链表，每次合并两条链表，然后将合并的结果，作为下一次的输入继续合并，直到完成所有的合并。</li>
+<li><code>tuple_cat_impl</code> 的两个 <code>f</code>函数是主要的逻辑，<code>make_tuple_from_fwd_tuple::f</code>和<code>concat_with_fwd_tuple::f</code>是辅助的函数。</li>
+</ul>
+<p>值得注意的地方：</p>
+<ul>
+<li>使用了之前实现的<code>forward_as_tuple</code>来创建 <code>Tuple</code>，保证了类型的不丢失。</li>
+<li>使用之前实现的<code>get&lt;indices&gt;()</code>和<code>tuple_size_v</code>来创建和和使用 paramter pack</li>
+</ul>
+<h1 id="filter">filter</h1>
+<pre><code class="language-c++">namespace detail {
+template &lt;typename TUP, size_t... indices&gt;
+constexpr auto cat_tuple_content(TUP&amp;&amp; t, std::index_sequence&lt;indices...&gt;) {
+	return tuple_cat(get&lt;indices&gt;(std::forward&lt;TUP&gt;(t))...);
+}
+}  // namespace detail
+
+template &lt;template &lt;typename...&gt; class PREDICATE, typename TUP&gt;
+constexpr auto filter(TUP&amp;&amp; tup) {
+	auto wrap_if_pred_matches = [&amp;]&lt;typename ELEM&gt;(ELEM&amp;&amp; e) {
+		if constexpr (PREDICATE&lt;std::remove_cvref_t&lt;ELEM&gt;&gt;::value) {
+			return forward_as_tuple(std::forward&lt;ELEM&gt;(e));
+		} else {
+			return Tuple&lt;&gt;{};
+		}
+	};
+	auto wrapped_tup = transform(std::forward&lt;TUP&gt;(tup), wrap_if_pred_matches);
+	// example: Tuple&lt;Tuple&lt;int&amp;&gt;, Tuple&lt;&gt;, Tuple&lt;unsigned&amp;&gt;, Tuple&lt;&gt;&gt;
+	return detail::cat_tuple_content(std::move(wrapped_tup),
+	                                 std::make_index_sequence&lt;tuple_size_v&lt;std::remove_cvref_t&lt;TUP&gt;&gt;&gt;{});
+	// example: Tuple&lt;int, unsigned&gt;
+}
+</code></pre>
+<p>实现原理：</p>
+<ul>
+<li>使用之前定义的 <code>transform</code>和<code>tuple_cat</code>,<code>transform</code>将不符合条件的设置为 <code>Tuple&lt;&gt;</code>，然后在合并的时候这部分就会被舍弃掉。</li>
+</ul>
+<h1 id="总结">总结</h1>
+<ul>
+<li>虽然自己之前对于Type Traits、CRTP等方法已经有多次使用，但是学习这个课程，还是让我让我收获了蛮多，期待之后将里面的知识融汇贯通了，进一步学习 std 标准库以及其他知名开源项目里面的源码。</li>
+<li>这次学习还有不完美的地方，比如自己实现的<code>Tuple</code>的相比于<code>std::tuple</code>会有多移动的情况，但是万事开头难，一口吃不成胖子，这次已经学习了很多的知识。已经取得了阶段性的成果，对于需要提高的地方之后继续学习，</li>
+</ul>
+<h1 id="参考资料">参考资料</h1>
+<ul>
+<li>包含所有代码的<a href="https://github.com/QBouts/BitsOfQ">Github 链接</a></li>
+<li>教程所在的<a href="https://www.youtube.com/playlist?list=PLWxziGKTUvQFIsbbFcTZz7jOT4TMGnZBh">Youtube 链接</a>，纯英文，声音有点儿小，不是流行的美语口音，但是发音不奇怪。</li>
+</ul>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[关于使用 VSCode 调试大型 Cpp 项目的一些实践]]></title>
+        <id>https://WatsonShum.github.io/post/ru-he-shi-yong-vscode-diao-shi-da-xing-cpp-xiang-mu/</id>
+        <link href="https://WatsonShum.github.io/post/ru-he-shi-yong-vscode-diao-shi-da-xing-cpp-xiang-mu/">
+        </link>
+        <updated>2024-05-26T04:56:22.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="背景">背景</h1>
+<p>首先明确下，本文指的调试指的是UI工具观察和控制程序执行的过程，并不是指打印日志。</p>
+<p>对于主流IDE来说，调试并不是什么问题，以 Visual Studio 为例，如果使用其默认配置写代码，调试就是点个按钮的事情。但是如果存在以下的因素，就会让调试变得更加困难。</p>
+<ul>
+<li><strong>代码量大</strong>，所以编译时间长，这意味着无法使用本机单独完成编译，需要使用云端分布式编译。</li>
+<li><strong>依赖多</strong>，为了解决这个问题，程序通常在指定的 Docker 中运行。</li>
+<li><strong>环境配置复杂</strong>，程序启动时会读取多种环境变量，并且这些环境变量是在 shell 或者 python 脚本中动态生成的。</li>
+<li>整个系统是一个<strong>分布式系统</strong>，调试的目标程序和其他程序存在跨进程通讯的情况。</li>
+</ul>
+<p>很遗憾，在某些大型系统的开发中，的确会出现以上的情况，整个的代码量在百万级别，使用云端编译系统，程序在 Docker 中运行，C++ 程序运行之前会有很多 Shell 和 Python 脚本做环境准备工作，整个系统有多个进程，进程间通过 RPC 等协议通讯。</p>
+<p>面对这种情况，一种 debug 方法是打日志，使用专业的日志库，每个模块可以打印出自己的日志，日志分为 warning、error 等级别，无可否认这也是一个好的方法，如果日志输出得适当，那么程序不需要运行就可以排查出问题。但是也会有一些缺点：</p>
+<ul>
+<li>如果要新增日志，需要重新编译程序，然后重新在 Docker 中运行程序，整个流程链路特别长，跑完一次要半小时左右，有时候为了排查一个小问题，可能都需要花费两三个小时。</li>
+<li>对于初次接手代码的新人来说，只靠日志很难理解整个代码库的逻辑，不如UI调试那么直观。</li>
+<li>日志打得太细节，容易影响整个代码的可读性，过少则难以发现问题。</li>
+</ul>
+<p>所以我还是希望能够有类似 IDE 的那样的 debug 体验，经过一番尝试，我最终摸透了使用 VSCode 在 Docker 中调试大型 Cpp 项目的流程。</p>
+<h1 id="调试的原理">调试的原理</h1>
+<p>底层调试工具是 GDB。编译时必须加上  <code>-g</code>  参数用以保证有调试相关的信息。此外，为了避免编译优化影响调试，应将优化级别设为 <code>-O0</code> 。不同的编译工具（如  Bazel  和 CMake ）封装了 GCC 的使用，它们通常支持这些编译选项，只是设置方法可能略有差异。</p>
+<p>在 VSCode 中，通过 UI 界面调用 GDB 进行调试，这需要安装  C/C++  扩展插件。这个插件封装了 GDB 的命令行使用，提供了一个更友好的调试界面，从而使得断点设置、步进和变量检查等操作直观易行。<br>
+<img src="https://WatsonShum.github.io/post-images/1716710670294.png" alt="" loading="lazy"></p>
+<p>本文只记录更进阶一些的关于调试大型项目的过程，至于这个插件的基本使用方法可以参考其他文章，比如这篇<a href="https://zhuanlan.zhihu.com/p/85273055">知乎文章</a>， 按照这个设置基本上可以 debug 一个简单的单机程序。</p>
+<p>简单来说在使用这个插件的时候，需要在一个配置文件中指定调试程序的路径，传入参数，目前工作目录等内容。也就是类似下面的 Json 中的配置。</p>
+<pre><code class="language-json">{
+    &quot;version&quot;: &quot;0.2.0&quot;,
+    &quot;configurations&quot;: [
+        {
+            &quot;name&quot;: &quot;gcc.exe - 生成和调试活动文件&quot;,  // 该调试任务的名字，启动调试时会在待选列表中显示
+            &quot;type&quot;: &quot;cppdbg&quot;,
+            &quot;request&quot;: &quot;launch&quot;,
+            &quot;program&quot;: &quot;${fileDirname}\\${fileBasenameNoExtension}.exe&quot;,
+            &quot;args&quot;: [],
+            &quot;stopAtEntry&quot;: false,  // 这一项控制是否在入口处暂停，默认false不暂停，改为true暂停
+            &quot;cwd&quot;: &quot;${workspaceFolder}&quot;,
+            &quot;environment&quot;: [],
+            &quot;externalConsole&quot;: false,  // 这一项控制是否启动外部控制台（独立的黑框）运行程序，默认false表示在集成终端中运行
+            &quot;MIMode&quot;: &quot;gdb&quot;,
+            &quot;miDebuggerPath&quot;: &quot;C:\\mingw64\\bin\\gdb.exe&quot;,  // 调试器路径，必须与你自己的电脑相符
+            &quot;setupCommands&quot;: [
+                {
+                    &quot;description&quot;: &quot;为 gdb 启用整齐打印&quot;,
+                    &quot;text&quot;: &quot;-enable-pretty-printing&quot;,
+                    &quot;ignoreFailures&quot;: true
+                }
+            ],
+            &quot;preLaunchTask&quot;: &quot;C/C++: gcc.exe build active file&quot;  // 调试前的预执行任务，这里的值是tasks.json文件中对应的编译任务，也就是调试前需要先编译
+        }
+    ]
+}
+</code></pre>
+<p>VSCode 根据这个 Json 中的配置调用 GDB 进行调试，这属于最简单、最基础的一种情况。但是对于大型项目的 debug 需要做许多其他的工作。</p>
+<h1 id="如何解决符号加载时间过长的问题">如何解决符号加载时间过长的问题</h1>
+<p>在编译过程中有动态加载和静态加载两种方式，在 Linux 上，程序加载 .so 文件是动态加载，在一个大型项目项目中，可能有几十个 .so 文件，每一个 .so 文件中对应一个模块，就单个工程师而言，其工作范围集中在一两个模块，那么调试的对象也就是这一两个模块，GDB在调试时需要加载 .so 文件利用其中的调试信息，如果 GDB 选择加载所有的 .so 文件，会十分耗时，理想的方法是只加载所需要调试的 .so 文件。<br>
+以下是如何配置 VSCode 以实现这一目标的步骤：</p>
+<pre><code class="language-json">&quot;symbolLoadInfo&quot;: {
+    &quot;loadAll&quot;: false, // similar to set auto-solib-add off
+    &quot;exceptionList&quot;: &quot;*example*&quot; // only load the library that matches the pattern
+    },
+</code></pre>
+<p>这样的配置确保 GDB 只加载与当前调试任务相关的动态库，显著减少等待时间。</p>
+<h1 id="如何解决在docker中的调试">如何解决在docker中的调试</h1>
+<p>相比于 Jetbrains 系列的IDE， VScode 一个十分突出的优点就是<s>不要钱</s>，不是（手动狗头），就是其优秀的远程开发的能力，无论是远程的服务器、还是本地的 Docker、更有甚者，包括远程服务器上面Docker， VScode 装上相关插件后，都可以获得类似本地工作的体验。对于在 Docker 中调试需要安装这个插件，Docker和这个插件的具体教程可以查看官方文档。<br>
+<img src="https://WatsonShum.github.io/post-images/1716713597533.png" alt="" loading="lazy"></p>
+<h1 id="如何解决环境配置复杂的问题">如何解决环境配置复杂的问题</h1>
+<p>GDB 调试有两种方法，一种是 launch，另一种是 attach，launch 就是使用 GDB 直接启动这个程序，attach 是先启动程序，然后  GDB 附加上去进行调试。使用 launch 的调试体验更好，但是如果程序依赖的环境变量是由脚本动态生成的，这时候实现 launch 就比较难，最好的方法是使用 attach，对此需要修改相应的 VSCode debug 配置。主要需要修改的是以下两个字段:</p>
+<pre><code class="language-json">  &quot;request&quot;: &quot;attach&quot;,  // request and launch
+  &quot;processId&quot;: &quot;${command:pickProcess}&quot;, // a special variable to pick process
+</code></pre>
+<p>其中<code>${command:pickProcess}</code> 是一个特殊的变量，需要在程序运行起来后，用户手动选择调试的程序。</p>
+<h1 id="如何在docker中寻找到代码">如何在Docker中寻找到代码</h1>
+<p>GDB 调试需要使用源代码，但是由于 Docker中并不含有源代码，代码在宿主机中，首先需要将源代码拷贝到 Docker 中，有以下的方法：</p>
+<ul>
+<li>使用 <code>docker cp</code> 命令，代码改动后，需要手动拷贝，比较耗时费力。</li>
+<li>使用 docker volume 挂载源代码目录，一次挂载，代码之后可以自动更新。</li>
+<li>使用 docker mount 挂载源代码目录，一次挂载，代码之后可以自动更新。</li>
+</ul>
+<p>对于 <code>docker volume</code>  和 <code>docker mount</code> 都需要在创建 container 之前就使用，如果 container已经运行起来了，有没有办法挂载文件夹到 container 上呢，也是有的，详情可以参考 StackOverflow 的回答：<a href="https://stackoverflow.com/questions/28302178/how-can-i-add-a-volume-to-an-existing-docker-container">相关链接</a>。</p>
+<p>在把源码拷贝到 Docker 容器中后，还需要确保 GDB 能够在 Docker 正确匹配源代码，使用GDB的 <code>dir</code>命令，在 VSCode 中配置 GDB 命令的方法如下：</p>
+<pre><code class="language-json">&quot;setupCommands&quot;: [
+    {
+        &quot;description&quot;: &quot;add dir&quot;,
+        &quot;text&quot;: &quot;dir /path_of_your_source,
+        &quot;ignoreFailures&quot;: true
+    },
+}
+</code></pre>
+<p>经过这样配置后，通常 GDB 能够找到源代码路径。</p>
+<h1 id="最终配置文件">最终配置文件</h1>
+<p>总结上面的各种要素，可以得到一份下面的配置文件。</p>
+<pre><code class="language-json">{
+    &quot;version&quot;: &quot;0.2.0&quot;,
+    &quot;configurations&quot;: [
+        {
+            &quot;name&quot;: &quot;Attach to Process&quot;,
+            &quot;type&quot;: &quot;cppdbg&quot;, // privided by C/C++ extension
+            &quot;program&quot;: &quot;/path_to_your_program&quot;, // similar to gdb file command
+            &quot;request&quot;: &quot;attach&quot;, // request and launch
+            &quot;processId&quot;: &quot;${command:pickProcess}&quot;, // a special variable to pick process
+            &quot;MIMode&quot;: &quot;gdb&quot;,
+            &quot;miDebuggerPath&quot;: &quot;/usr/bin/gdb&quot;,
+            // &quot;logging&quot;: {
+            //     &quot;engineLogging&quot;: true
+            // },
+            &quot;cwd&quot;: &quot;cwd&quot;,
+            &quot;symbolLoadInfo&quot;: {
+                &quot;loadAll&quot;: false, // similar to set auto-solib-add off
+                &quot;exceptionList&quot;: &quot;*example*&quot; // only load the library that matches the pattern
+            },
+            &quot;additionalSOLibSearchPath&quot;: &quot;/home/caros/cybertron/lib&quot;,
+            &quot;setupCommands&quot;: [
+                {
+                    &quot;description&quot;: &quot;Enable pretty-printing for gdb&quot;,
+                    &quot;text&quot;: &quot;-enable-pretty-printing&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Set verbose on&quot;,
+                    &quot;text&quot;: &quot;-gdb-set verbose on&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn off auto-solib-add&quot;,
+                    &quot;text&quot;: &quot;-gdb-set auto-solib-add on&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn on lazy load&quot;,
+                    &quot;text&quot;: &quot;-gdb-set lazy-load-symbols off &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn off range stepping&quot;,
+                    &quot;text&quot;: &quot;-gdb-set range-stepping off &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn on startup-with-shell&quot;,
+                    &quot;text&quot;: &quot;-gdb-set startup-with-shell on &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;add dir&quot;,
+                    &quot;text&quot;: &quot;dir /path_to_your_source_code&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+            ],
+        }
+    ]
+}
+
+</code></pre>
+<p>经过上面的操作就可以使用 VSCode 连接 Docker ，然后在里面进行 debug 操作了。</p>
+<h1 id="总结">总结</h1>
+<p>随着代码工程规模的扩大，会逐渐出现两个问题，第一个是编译时间过长的问题，第二个是运行环境不统一的问题，为了解决这两个问题，可以使用云端编译和 Docker 等技术，但是会破坏 debug 的能力。本文综合了 GDB、Docker、VSCode 、编译原理等知识，重建了整个能力，有利于提高开发新功能和排查问题的效率。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[Unreal5.0学习]]></title>
+        <id>https://WatsonShum.github.io/post/unreal-xue-xi/</id>
+        <link href="https://WatsonShum.github.io/post/unreal-xue-xi/">
+        </link>
+        <updated>2023-10-04T06:30:02.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="背景">背景</h1>
+<p>自己对于计算机图形学一直比较感兴趣，已经有过相关的经历，之前使用 Unigine 这样一款三维引擎做过开发，工作后也积累了 OpenGL 经验。但是对于主流的 Game Engine 还没有上手经验，于是就在 Youtube上找了一个<a href="https://www.youtube.com/watch?v=k-zMkzmduqI&amp;t=3785s">学习视频</a>开始学习。此篇Post 是对学习过程的简单记录。</p>
+<h1 id="操作和窗口">操作和窗口</h1>
+<p>自己之前接触过 SolidWorks 等三维软件，Unreal 的操作和窗口布局和之前接触过三维软件差不多，所以就不详细记录了。</p>
+<h1 id="material-graph">Material Graph</h1>
+<p>Materia l是计算机图形学中十分重要的一个概念，应用广泛，除了可以储存颜色之外，还可以当作 Mask 以及当作 normal map。<br>
+Unreal 的纹理是基于 PBR 的，包括基础颜色，Metallic、Roughness等选项，可以通过Material Graph已可视化的方式来编辑。同时还有个类似与 Class-Instance 的系统，可以创建一个 Material 模板，然后生成相应的 Instance，模板中的 parameter 是可变的。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401081311.png" alt="" loading="lazy"></p>
+<h1 id="light-source">Light Source</h1>
+<p>有下面几种光源：</p>
+<ul>
+<li>Directional Light（Sun Light）</li>
+<li>Point Light</li>
+<li>Spot Light</li>
+<li>Reactangle Light<br>
+属性包括 temperature 和 Intensity 等，也是模拟真实世界，米家的智能家具灯泡就包括这几种可调的参数。</li>
+</ul>
+<h1 id="lumen">Lumen</h1>
+<p>是一种real time global illumination，使用方法：</p>
+<ul>
+<li>在 PostProcessVolumn 中设置全局光照-方法为 Lumen，设置反射-方法为 Lumen</li>
+<li>Light Source 需要设置为 Movable<br>
+之前的方法都不是实时的，需要进行 Bake，生成的是一张 Texture。可以做到的效果会好很多，但是每次修改参数都需要重新构建。</li>
+</ul>
+<h1 id="landscape">Landscape</h1>
+<p>Landscape模式用于创建地形，提供了多种笔刷，常用的有雕刻、平滑、平整等。可以通过纹理给地表添加颜色。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401094587.png" alt="" loading="lazy"></p>
+<h1 id="quixel-bridge">Quixel Bridge</h1>
+<p>Quixel Bridge 是一个在线的免费的 digital asset 资料库，有 3D 模型以及 Surface 等内容。导入的方法也十分简单，直接拖拽就可以了，会自动在 Content Drawer 里面创建一个 Megascans 的文件夹。</p>
+<h1 id="foliage-mode">Foliage Mode</h1>
+<p>Foliage 模式用于绘制地表植物，<br>
+可以从从 Quixel 里面导入植物，然后有一些材质 Parameter 可以使用，比如 Color Variation, Wind等。打开具体的 static mesh 可以看到 LOD，LOD0 是最近的，LOD4 完全就是一张图片了，也就是billboard。<br>
+编辑植物和编辑 Landscape 差不多，都是通过笔刷。 在 Foliage 中也可以使用 Select 功能，控制每一株植物的位置。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401102598.png" alt="" loading="lazy"></p>
+<h1 id="nanite">Nanite</h1>
+<p>一种很厉害的技术，能够自动实现 LOD 而不丢失细节，同时性能还有保证。启用方法十分简单，直接在Content Drawe 里面右键物体选择 Enable Nanite 就可以了。可以直接从 Quixel 中下载 Nanite 格式的资产。</p>
+<h1 id="blueprint">BluePrint</h1>
+<p>BluePrin 是 Unrea l的 Visual Scripting Language，导入 Third-person shoot feature pack后，可以得到一个默认的 Character 和 BluePrint，可以在 World Setting 的 GameMode Override启用 BP_ThirdPersonGameMode。双击这个 Character 就以打开BluePrint的编辑界面，得到一个类似Material Graph 的 Event Grapgh。</p>
+<ul>
+<li>可以通过 PlayerStart 这个Object来指定Player出生的地点。</li>
+<li>还有一个可视化 Debug 的功能</li>
+<li>自己感觉 BluePrint 是基于 Publish-Subsrcibe的思路设计的，通过事件把整个流程串起来，用户也可以自己定义事件。</li>
+</ul>
+<h1 id="castle-environment">Castle Environment</h1>
+<p>在这个项目中会将之前用到的知识综合应用，创建出一个游戏场景。整体的制作顺序是Large-&gt;Medium-&gt;Detail：</p>
+<ul>
+<li>在 Large 的制作阶段，创建了 Lanscape，用笔刷刷出了一些地形，创建了湖泊，导入纹理当作远方背景。</li>
+<li>在 Medium 阶段，添加了 3D Mesh作为悬崖，这让场景看起来更加真实。</li>
+<li>之后添加了Unreal的自带商城里面导入了 megascan 的树木资产包，设置风速和季节等属性。</li>
+<li>之后添加了城堡，城堡是模块化设计，由许多组件组装而成。<br>
+下图是最终的效果：<br>
+<img src="https://WatsonShum.github.io/post-images/1696401112924.png" alt="" loading="lazy"></li>
+</ul>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[Cpp 实现一个插件系统]]></title>
+        <id>https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-cha-jian-xi-tong/</id>
+        <link href="https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-cha-jian-xi-tong/">
+        </link>
+        <updated>2023-08-12T12:02:04.000Z</updated>
+        <content type="html"><![CDATA[<p>之前自己写过许多插件，比如 SolidWorks 和 Matlab 的插件，这次自己实现一个插件系统，自己经过一番尝试，也算是做了一个有模有样的东西，虽然离成熟的商业产品还有距离，但是已经能满足需求了。因此也用一篇文章记录一下。</p>
+<h1 id="背景">背景</h1>
+<p>假设有一个在Linux上本地运行的软件，服务许多用户，之前的工作流程是用户提出需求，和开发人员定好相关参数，经过排期，实现功能后，编译打包软件交给用户，以上整个的工作链条比较长。<br>
+再假设由于有多个业务方向的团队使用该软件，并且每个团队所需的功能不同但是都很相近，比如团队A需要功能1、2、3、4，而团队B需要功能5、6、7、8。因此，软件打包了两个不同的版本。给团队A给的是版本A，给团队B给的是版本B，对于这两个版本的区分不是很清楚，在代码中很多是通过 <code>if-else</code> 来实现的。<br>
+另一方面用户有时候一些简单的功能需求，希望能够快速得得到验证，但是由于排期比较紧张，所以用户需要等待开发人员实现后才能验证他们的想法。<br>
+为了解决以上的问题，希望这个软件支持插件系统，实现如下的目标：</p>
+<ul>
+<li>缩短实现功能的流程，用户可以自己创建插件，而不需要给开发团队提需求，可以快速验证他们的想法。</li>
+<li>实现代码的解耦，不再需要编译不同的软件版本，而只是需要一个软件本体，加上相应的插件就可以满足需求，理想情况下，对于团队A，只需要提供软件本体和功能1、2、3、4的插件就可以了。每次新增一个功能也不需要重新编译软件本体，只需要新开发一个插件。</li>
+</ul>
+<p>基于以上的目标，我设计并实现了如下的插件系统：</p>
+<ul>
+<li>用户使用我提供的基础类和API，创建自己的插件，并编译成.so文件，这些插件单独存放在专门的插件仓库中。</li>
+<li>本体软件动态加载这些.so文件，实现动态加载功能，本体软件存放在另外一个仓库。</li>
+</ul>
+<h1 id="实现原理">实现原理</h1>
+<p>由于用户的插件是单独编译成一个.so 文件，我们需要使用 <code>dlopen</code> 和 <code>dlsym</code> 来加载 .so 中的符号，<code>dlopen</code> 和 <code>dlsym</code> 是 POSIX 操作系统提供的函数，在 Windows 上也有对应的函数。</p>
+<p><code>dlopen</code> 返回是解析后的 .so 文件的句柄，输入参数为 .so 文件地址和 解析模式。</p>
+<pre><code class="language-cpp">void* handle = dlopen(&quot;./plugin.so&quot;, RTLD_LAZY);
+</code></pre>
+<p><code>dlsym</code> 返回的是解析后的函数对象，输入参数是 .so文件的句柄以及所解析函数的名称。</p>
+<pre><code class="language-cpp"> plugin_function func = (plugin_function) dlsym(handle, &quot;plugin_function&quot;);
+</code></pre>
+<p>.so 文件中的符号名称是编译器根据 函数名称动态生成的：</p>
+<ul>
+<li>对于这样 <code>extern &quot;C&quot; void plugin_function()</code> 使用 <code>extern &quot;C&quot;</code> 修饰的函数，编译后在.so 的符号名称和函数名称一致。</li>
+<li>对于类的成员函数，涉及到 Name Mangling，C++编译器会对类的成员函数进行名称修饰，以确保每个符号在链接时都是唯一的。这是因为C++支持函数重载（即同名函数可以有不同的参数列表），所以需要一种机制来唯一标识每个函数。所以经常编译后可以看到一些类似乱码，但是又有规律可辨的符号，比如下面这样：<pre><code class="language-cpp">00000000000006b5 T _ZN7Example15member_functionEi
+</code></pre>
+</li>
+</ul>
+<p>为了能够在使用 <code>dlsym</code>时能够准确找到该函数的符号，所以该函数需要被标记成为 <code>extern &quot;C&quot;</code>。<br>
+了解了以上这些知识，就可以来设计插件系统了。</p>
+<h1 id="代码实现">代码实现</h1>
+<h2 id="pluginbase"><code>PluginBase</code></h2>
+<pre><code class="language-cpp">#include &lt;string&gt;
+class PluginManager//前置声明
+// 基类插件
+class PluginBase {
+ public:
+  virtual ~PluginBase() = default;
+
+  // 纯虚函数，派生插件应实现该函数
+  virtual std::string GetName() const = 0;
+  virtual void Run() = 0;
+
+  std::shared_ptr&lt;PluginManager&gt; plugin_manager;//用来获取的 API
+};
+
+// 宏，用于定义导出C接口的创建插件实例函数
+#define CREATE_PLUGIN(PluginClass) \
+extern &quot;C&quot; PluginBase* CreatePlugin() { \
+  return new PluginClass(); \
+}
+
+#endif  // PLUGIN_BASE_H_
+</code></pre>
+<p>在 PluginBase 的头文件中，定义了 <code>CREATE_PLUGIN(PluginClass)</code>这样一个宏，用来快速地生成插件实例。</p>
+<h2 id="plugin-manger">Plugin Manger</h2>
+<p>为了管理这些插件，我们创建一个 <code>PluginManager 类</code>，这个类的主要工作是：</p>
+<ul>
+<li>负责加载和管理插件，所以它依赖于 <code>PluginBase</code> 这个类，加载插件的函数是 <code>LoadPlugin</code>，加载后的插件放在 <code>vector</code> 这样一个数据结构中。 通过 <code>ShutDown</code> 函数卸载所有插件。</li>
+<li>给插件提供 API，比如在下面的例子中，就给 Plugin 提供了 <code>APIMethod1()</code>、<code>APIMethod2()</code>、<code>APIMethod3()</code>等 API。</li>
+</ul>
+<pre><code class="language-cpp">#include &quot;plugin_base.h&quot;
+// 单例模式插件管理器
+class PluginManager {
+ public:
+  static std::shared_ptr&lt;PluginManager&gt; Instance() {
+    static auto instance=make_shared&lt;PluginManager&gt;();
+    return instance;
+  }
+
+  bool LoadPlugin(const std::string&amp; plugin_path) {
+    void* handle = dlopen(plugin_path.c_str(), RTLD_LAZY);
+    if (!handle) {
+      std::cerr &lt;&lt; &quot;Cannot open library: &quot; &lt;&lt; dlerror() &lt;&lt; '\n';
+      return false;
+    }
+
+    // 清除现有错误
+    dlerror();
+
+    // 加载符号
+    using CreatePluginFunc = PluginBase* (*)();
+    CreatePluginFunc create_plugin = (CreatePluginFunc) dlsym(handle, &quot;CreatePlugin&quot;);
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+      std::cerr &lt;&lt; &quot;Cannot load symbol 'CreatePlugin': &quot; &lt;&lt; dlsym_error &lt;&lt; '\n';
+      dlclose(handle);
+      return false;
+    }
+
+    // 创建插件实例并存储
+    std::shared_ptr&lt;PluginBase&gt; plugin(create_plugin());
+    plugins_.push_back(plugin);
+    handles_.push_back(handle);
+    return true;
+  }
+  void Run(){
+      for(auto plugin: plugins_){
+          plugin-&gt;Run();
+      }
+  }
+
+  void APIMethod1() {
+    // 实现API方法1
+  }
+
+  void APIMethod2() {
+    // 实现API方法2
+  }
+
+  void APIMethod3() {
+    // 实现API方法3
+  }
+  
+  void ShutDown() {
+    for (void* handle : handles_) {
+      dlclose(handle);
+    }
+    plugins_.clear();
+    handles_.clear();
+  }
+
+ private:
+  PluginManager() = default;
+  ~PluginManager() {
+    ShutDown();
+  }
+  PluginManager(const PluginManager&amp;) = delete;
+  PluginManager&amp; operator=(const PluginManager&amp;) = delete;
+
+  std::vector&lt;std::shared_ptr&lt;PluginBase&gt;&gt; plugins_;
+  std::vector&lt;void*&gt; handles_;
+};
+</code></pre>
+<h2 id="exmapleplugin">ExmaplePlugin</h2>
+<p>为了让用户明白如何使用这个 Plugin系统，提供一个例子是必须的。</p>
+<pre><code class="language-cpp">#include &lt;iostream&gt;
+#include &quot;plugin_manager.h&quot;
+// 示例插件
+class ExamplePlugin : public PluginBase {
+ public:
+  std::string GetName() const override {
+    return &quot;ExamplePlugin&quot;;
+  }
+  void Run(){
+      plugin_manager-&gt;APIMethod1();
+      plugin_manager-&gt;APIMethod2();// 调用API 做一些事情
+  }
+};
+
+// 使用宏定义创建插件实例函数
+CREATE_PLUGIN(ExamplePlugin)
+</code></pre>
+<p>这个插件引用了 <code>PluginManager</code> 的头文件用来调用其提供的 API 以及获取 <code>PluginBase</code> 对象，这个 Plugin会单独编译成.so，所以 <code>PluginManager</code> 这个单例会失效，相当于每一个 Plugin 都会有一个自己的单例。这样是不符合设计目标的，为了解决问题，需要在每个插件加载后，加上这样一个语句。</p>
+<pre><code class="language-cpp">std::shared_ptr&lt;PluginBase&gt; plugin(create_plugin());
+plugin-&gt;plugin_manager=this-&gt;Instance(); //强制把插件中的单例设置成本体软件中的单例
+plugins_.push_back(plugin);
+</code></pre>
+<p>这个插件最终需要单独编译，编译的设置根据不同的编译工具而异，使用 Bazel、Cmake 都可以。</p>
+<h1 id="最终使用">最终使用</h1>
+<pre><code class="language-cpp">#include &quot;PluginManager.h&quot;
+#include &lt;iostream&gt;
+
+int main() {
+  auto plugin_manager = PluginManager::Instance();
+
+  // 替换为你的插件实际路径
+  if (plugin_manager-&gt;LoadPlugin(&quot;./libexample.so&quot;)) {
+    std::cout &lt;&lt; &quot;Plugin loaded successfully.\n&quot;;
+  } else {
+    std::cerr &lt;&lt; &quot;Failed to load plugin.\n&quot;;
+  }
+  plugin_manager-&gt;Run()
+  // 卸载插件
+  plugin_manager-&gt;ShutDown();
+
+  return 0;
+}
+</code></pre>
+<p>实际工程中，肯定不止一个插件，用户可以将所有编译好的插件放在一个目录下面，然后加载，所以给 <code>PluginManager</code> 新增这样一个函数：</p>
+<pre><code class="language-cpp"> bool LoadPluginsFromDirectory(const std::string&amp; directory_path) {
+    for (const auto&amp; entry : std::filesystem::directory_iterator(directory_path)) {
+      if (entry.path().extension() == &quot;.so&quot;) {
+        if (!LoadPlugin(entry.path().string())) {
+          std::cerr &lt;&lt; &quot;Failed to load plugin: &quot; &lt;&lt; entry.path() &lt;&lt; '\n';
+        }
+      }
+    }
+    return true;
+  }
+</code></pre>
+<h1 id="总结">总结</h1>
+<p>本文设计并实现了一个插件系统，当然这个也不是什么前沿技术，不过还是涉及到了许多的知识点，可以让自己变得不只是一个 <code>if-else</code>工程师，说起插件系统，百度开源的 CyberRT 框架也是插件化的设计，每个算法模块都会继承一个基类，然后编译成一个.so 文件被动态加载，其原理和我实现的这个插件系统是几乎一样的，只是对于一些类的封装不同，对这块感兴趣的读者也可以去看一下相关源码。<br>
+目前一个可以改进的地方就是对于多个单例的处理，希望能够改变编译关系，从根本上解决这个问题。</p>
+<p>除了这个插件系统本身，还有许多其他的额外工作需要做，比如插件系统的选择性编译，以及对于 API 的封装，这些工作就不在本文的框架下继续记录了。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[Cpp实现一个简单的事件系统]]></title>
+        <id>https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong/</id>
+        <link href="https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong/">
+        </link>
+        <updated>2023-08-12T12:01:19.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="缘起">缘起</h1>
+<p>自己之前写过C#，个人觉得C#的事件系统十分地好用，但是项目中用的是Cpp，Cpp 并没有提供内建的事件系统，于是经过调研，参考了这篇文章<a href="https://bastian.rieck.me/blog/posts/2015/event_system_cxx11/">Implement A Simple Event System in Cpp11</a>，经改造后，个人感觉效果还不错。决定记录一下，整理出一篇文章。<br>
+<strong>事先说明，本文部分内容来自那篇英文文章，同时也包含了一些个人思考。</strong></p>
+<h1 id="框架">框架</h1>
+<p>事件系统一般会使用<a href="https://refactoring.guru/design-patterns/observer">订阅/发布模式</a>，简单来说包括以下概念：</p>
+<ul>
+<li>Event：事件</li>
+<li>Event Handler：事件处理函数</li>
+<li>Event Sender：事件的触发者。</li>
+<li>Event Dispatcher：事件分发器。<br>
+基本的工作流程是  Event Sender 创建一个 Event，然后使用 Event Dispatcher 发布，Event Dispatcher 寻找该事件的 Handler，并交给其处理。</li>
+</ul>
+<h1 id="event">Event</h1>
+<pre><code class="language-cpp">class EventBase {
+public:
+    enum class Type {//事件的类别
+        Type1,
+        Type2,
+        Type3
+    };
+    EventBase(const Type&amp; type) : _type(type) {}
+    virtual ~EventBase() {}
+    virtual Type type() const { return _type; }
+
+private:
+    Type _type;
+};
+</code></pre>
+<p>定义了一个 <code>EventBase</code> 类，用于表示最基础的 Event。</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+class Event : public EventBase {
+public:
+    Event(const Type&amp; type, const T&amp; data) : EventBase(type), _data(data) {}
+    Event(const Type&amp; type) : EventBase(type) {}
+    virtual ~Event() {}
+    void set_data(const T&amp; data) { _data = data; }
+    T get_data() const { return _data; }
+
+private:
+    T _data;//事件传递的参数
+};
+</code></pre>
+<p>使用范型定义了一个子类，这个子类的的主要功能是通过范型来传递数据，而且由于 <code>Event&lt;A&gt;</code>和 <code>Event&lt;B&gt;</code> 都算作 <code>Eventbase</code>的子类，之后可以和多态结合使用。</p>
+<h1 id="dispatcher">Dispatcher</h1>
+<pre><code class="language-cpp">class Dispatcher {
+public:
+    using EventHandler = std::function&lt;void(std::shared_ptr&lt;EventBase&gt;)&gt;;//事件处理函数
+    void subscribe(const EventBase::Type&amp; descriptor, EventHandler&amp;&amp; handler) { _observers[descriptor].push_back(handler); };
+    void post(std::shared_ptr&lt;EventBase&gt; event) const;
+
+    static std::unique_ptr&lt;Dispatcher&gt;&amp; instance() {//单例
+        static auto instance = std::make_unique&lt;Dispatcher&gt;();
+        return instance;
+    }
+    Dispatcher() = default;
+    ~Dispatcher() = default;
+    Dispatcher(const Dispatcher&amp;) = delete;
+    Dispatcher&amp; operator=(const Dispatcher&amp;) = delete;
+    Dispatcher(Dispatcher&amp;&amp;) = delete;
+    Dispatcher&amp; operator=(Dispatcher&amp;&amp;) = delete;
+
+private:
+    std::map&lt;EventBase::Type, std::vector&lt;EventHandler&gt;&gt; _observers;
+};
+</code></pre>
+<p>对上面代码的解释：</p>
+<ul>
+<li>为了让这个事件系统可以被到处访问，将 <code>Dispatcher</code> 封装成单例。</li>
+<li><code>Event</code> 和 <code>EventHandler</code> 通过 hashmap存储映射关系。</li>
+<li><code>EventHandler</code>，本质来说是一个函数指针，表示处理这种事件的函数。由于一种 Event 可以有多个handler ，所以使用 vector 储存这些handler。</li>
+<li>针对上面<code>_observers</code>有两种基本的读写操作，第一种是增加一种 Event 和 Handler 的匹配关系，也就是 subscribe。</li>
+</ul>
+<pre><code class="language-cpp">void subscribe(const EventBase::Type&amp; descriptor, EventHandler&amp;&amp; handler) {   
+            _observers[descriptor].push_back(handler);
+};
+</code></pre>
+<p>第二种操作是触发某种Event，也就是 post</p>
+<pre><code class="language-cpp">void post(std::shared_ptr&lt;EventBase&gt; event // 使用了多态
+</code></pre>
+<h1 id="如何使用">如何使用</h1>
+<pre><code class="language-cpp">int main() {
+    auto my_event_handler=[](const std::shared_ptr&lt;EventBase&gt; event){
+        auto event1=std::dynamic_cast&lt;std::shared_ptr&lt;Event&lt;int&gt; &gt;&gt;(event);//cast 成字类
+        if(event1==nullptr){return;}
+        std::cout&lt;&lt;&quot;Event Data is:&quot;&lt;&lt;event1-&gt;get_data()&lt;&lt;std::endl;
+    }
+    // 订阅事件
+    Dispatcher::instance()-&gt;subscribe(EventBase::Type::Type1, my_event_handler);
+
+    // 创建并触发事件
+    auto event = std::make_shared&lt;Event&lt;int&gt;&gt;(EventBase::Type::Type1, 666);
+    Dispatcher::instance()-&gt;post(event);
+    return 0;
+}
+</code></pre>
+]]></content>
+    </entry>
+</feed>

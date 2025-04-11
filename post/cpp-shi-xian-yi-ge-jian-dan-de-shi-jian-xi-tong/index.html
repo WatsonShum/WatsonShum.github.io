@@ -1,0 +1,260 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cpp实现一个简单的事件系统 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="Cpp实现一个简单的事件系统 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="缘起
+自己之前写过C#，个人觉得C#的事件系统十分地好用，但是项目中用的是Cpp，Cpp 并没有提供内建的事件系统，于是经过调研，参考了这篇文章Implement A Simple Event System in Cpp11，经改造后，个人..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              Cpp实现一个简单的事件系统
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-08-12
+              </span>
+              <span>
+                4 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="缘起">缘起</h1>
+<p>自己之前写过C#，个人觉得C#的事件系统十分地好用，但是项目中用的是Cpp，Cpp 并没有提供内建的事件系统，于是经过调研，参考了这篇文章<a href="https://bastian.rieck.me/blog/posts/2015/event_system_cxx11/">Implement A Simple Event System in Cpp11</a>，经改造后，个人感觉效果还不错。决定记录一下，整理出一篇文章。<br>
+<strong>事先说明，本文部分内容来自那篇英文文章，同时也包含了一些个人思考。</strong></p>
+<h1 id="框架">框架</h1>
+<p>事件系统一般会使用<a href="https://refactoring.guru/design-patterns/observer">订阅/发布模式</a>，简单来说包括以下概念：</p>
+<ul>
+<li>Event：事件</li>
+<li>Event Handler：事件处理函数</li>
+<li>Event Sender：事件的触发者。</li>
+<li>Event Dispatcher：事件分发器。<br>
+基本的工作流程是  Event Sender 创建一个 Event，然后使用 Event Dispatcher 发布，Event Dispatcher 寻找该事件的 Handler，并交给其处理。</li>
+</ul>
+<h1 id="event">Event</h1>
+<pre><code class="language-cpp">class EventBase {
+public:
+    enum class Type {//事件的类别
+        Type1,
+        Type2,
+        Type3
+    };
+    EventBase(const Type&amp; type) : _type(type) {}
+    virtual ~EventBase() {}
+    virtual Type type() const { return _type; }
+
+private:
+    Type _type;
+};
+</code></pre>
+<p>定义了一个 <code>EventBase</code> 类，用于表示最基础的 Event。</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+class Event : public EventBase {
+public:
+    Event(const Type&amp; type, const T&amp; data) : EventBase(type), _data(data) {}
+    Event(const Type&amp; type) : EventBase(type) {}
+    virtual ~Event() {}
+    void set_data(const T&amp; data) { _data = data; }
+    T get_data() const { return _data; }
+
+private:
+    T _data;//事件传递的参数
+};
+</code></pre>
+<p>使用范型定义了一个子类，这个子类的的主要功能是通过范型来传递数据，而且由于 <code>Event&lt;A&gt;</code>和 <code>Event&lt;B&gt;</code> 都算作 <code>Eventbase</code>的子类，之后可以和多态结合使用。</p>
+<h1 id="dispatcher">Dispatcher</h1>
+<pre><code class="language-cpp">class Dispatcher {
+public:
+    using EventHandler = std::function&lt;void(std::shared_ptr&lt;EventBase&gt;)&gt;;//事件处理函数
+    void subscribe(const EventBase::Type&amp; descriptor, EventHandler&amp;&amp; handler) { _observers[descriptor].push_back(handler); };
+    void post(std::shared_ptr&lt;EventBase&gt; event) const;
+
+    static std::unique_ptr&lt;Dispatcher&gt;&amp; instance() {//单例
+        static auto instance = std::make_unique&lt;Dispatcher&gt;();
+        return instance;
+    }
+    Dispatcher() = default;
+    ~Dispatcher() = default;
+    Dispatcher(const Dispatcher&amp;) = delete;
+    Dispatcher&amp; operator=(const Dispatcher&amp;) = delete;
+    Dispatcher(Dispatcher&amp;&amp;) = delete;
+    Dispatcher&amp; operator=(Dispatcher&amp;&amp;) = delete;
+
+private:
+    std::map&lt;EventBase::Type, std::vector&lt;EventHandler&gt;&gt; _observers;
+};
+</code></pre>
+<p>对上面代码的解释：</p>
+<ul>
+<li>为了让这个事件系统可以被到处访问，将 <code>Dispatcher</code> 封装成单例。</li>
+<li><code>Event</code> 和 <code>EventHandler</code> 通过 hashmap存储映射关系。</li>
+<li><code>EventHandler</code>，本质来说是一个函数指针，表示处理这种事件的函数。由于一种 Event 可以有多个handler ，所以使用 vector 储存这些handler。</li>
+<li>针对上面<code>_observers</code>有两种基本的读写操作，第一种是增加一种 Event 和 Handler 的匹配关系，也就是 subscribe。</li>
+</ul>
+<pre><code class="language-cpp">void subscribe(const EventBase::Type&amp; descriptor, EventHandler&amp;&amp; handler) {   
+            _observers[descriptor].push_back(handler);
+};
+</code></pre>
+<p>第二种操作是触发某种Event，也就是 post</p>
+<pre><code class="language-cpp">void post(std::shared_ptr&lt;EventBase&gt; event // 使用了多态
+</code></pre>
+<h1 id="如何使用">如何使用</h1>
+<pre><code class="language-cpp">int main() {
+    auto my_event_handler=[](const std::shared_ptr&lt;EventBase&gt; event){
+        auto event1=std::dynamic_cast&lt;std::shared_ptr&lt;Event&lt;int&gt; &gt;&gt;(event);//cast 成字类
+        if(event1==nullptr){return;}
+        std::cout&lt;&lt;&quot;Event Data is:&quot;&lt;&lt;event1-&gt;get_data()&lt;&lt;std::endl;
+    }
+    // 订阅事件
+    Dispatcher::instance()-&gt;subscribe(EventBase::Type::Type1, my_event_handler);
+
+    // 创建并触发事件
+    auto event = std::make_shared&lt;Event&lt;int&gt;&gt;(EventBase::Type::Type1, 666);
+    Dispatcher::instance()-&gt;post(event);
+    return 0;
+}
+</code></pre>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E7%BC%98%E8%B5%B7">缘起</a></li>
+<li><a href="#%E6%A1%86%E6%9E%B6">框架</a></li>
+<li><a href="#event">Event</a></li>
+<li><a href="#dispatcher">Dispatcher</a></li>
+<li><a href="#%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8">如何使用</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

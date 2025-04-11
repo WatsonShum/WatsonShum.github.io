@@ -1,0 +1,332 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>关于使用 VSCode 调试大型 Cpp 项目的一些实践 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="关于使用 VSCode 调试大型 Cpp 项目的一些实践 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="背景
+首先明确下，本文指的调试指的是UI工具观察和控制程序执行的过程，并不是指打印日志。
+对于主流IDE来说，调试并不是什么问题，以 Visual Studio 为例，如果使用其默认配置写代码，调试就是点个按钮的事情。但是如果存在以下的因素..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              关于使用 VSCode 调试大型 Cpp 项目的一些实践
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-05-26
+              </span>
+              <span>
+                11 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/ru-he-shi-yong-vscode-diao-shi-da-xing-cpp-xiang-mu.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="背景">背景</h1>
+<p>首先明确下，本文指的调试指的是UI工具观察和控制程序执行的过程，并不是指打印日志。</p>
+<p>对于主流IDE来说，调试并不是什么问题，以 Visual Studio 为例，如果使用其默认配置写代码，调试就是点个按钮的事情。但是如果存在以下的因素，就会让调试变得更加困难。</p>
+<ul>
+<li><strong>代码量大</strong>，所以编译时间长，这意味着无法使用本机单独完成编译，需要使用云端分布式编译。</li>
+<li><strong>依赖多</strong>，为了解决这个问题，程序通常在指定的 Docker 中运行。</li>
+<li><strong>环境配置复杂</strong>，程序启动时会读取多种环境变量，并且这些环境变量是在 shell 或者 python 脚本中动态生成的。</li>
+<li>整个系统是一个<strong>分布式系统</strong>，调试的目标程序和其他程序存在跨进程通讯的情况。</li>
+</ul>
+<p>很遗憾，在某些大型系统的开发中，的确会出现以上的情况，整个的代码量在百万级别，使用云端编译系统，程序在 Docker 中运行，C++ 程序运行之前会有很多 Shell 和 Python 脚本做环境准备工作，整个系统有多个进程，进程间通过 RPC 等协议通讯。</p>
+<p>面对这种情况，一种 debug 方法是打日志，使用专业的日志库，每个模块可以打印出自己的日志，日志分为 warning、error 等级别，无可否认这也是一个好的方法，如果日志输出得适当，那么程序不需要运行就可以排查出问题。但是也会有一些缺点：</p>
+<ul>
+<li>如果要新增日志，需要重新编译程序，然后重新在 Docker 中运行程序，整个流程链路特别长，跑完一次要半小时左右，有时候为了排查一个小问题，可能都需要花费两三个小时。</li>
+<li>对于初次接手代码的新人来说，只靠日志很难理解整个代码库的逻辑，不如UI调试那么直观。</li>
+<li>日志打得太细节，容易影响整个代码的可读性，过少则难以发现问题。</li>
+</ul>
+<p>所以我还是希望能够有类似 IDE 的那样的 debug 体验，经过一番尝试，我最终摸透了使用 VSCode 在 Docker 中调试大型 Cpp 项目的流程。</p>
+<h1 id="调试的原理">调试的原理</h1>
+<p>底层调试工具是 GDB。编译时必须加上  <code>-g</code>  参数用以保证有调试相关的信息。此外，为了避免编译优化影响调试，应将优化级别设为 <code>-O0</code> 。不同的编译工具（如  Bazel  和 CMake ）封装了 GCC 的使用，它们通常支持这些编译选项，只是设置方法可能略有差异。</p>
+<p>在 VSCode 中，通过 UI 界面调用 GDB 进行调试，这需要安装  C/C++  扩展插件。这个插件封装了 GDB 的命令行使用，提供了一个更友好的调试界面，从而使得断点设置、步进和变量检查等操作直观易行。<br>
+<img src="https://WatsonShum.github.io/post-images/1716710670294.png" alt="" loading="lazy"></p>
+<p>本文只记录更进阶一些的关于调试大型项目的过程，至于这个插件的基本使用方法可以参考其他文章，比如这篇<a href="https://zhuanlan.zhihu.com/p/85273055">知乎文章</a>， 按照这个设置基本上可以 debug 一个简单的单机程序。</p>
+<p>简单来说在使用这个插件的时候，需要在一个配置文件中指定调试程序的路径，传入参数，目前工作目录等内容。也就是类似下面的 Json 中的配置。</p>
+<pre><code class="language-json">{
+    &quot;version&quot;: &quot;0.2.0&quot;,
+    &quot;configurations&quot;: [
+        {
+            &quot;name&quot;: &quot;gcc.exe - 生成和调试活动文件&quot;,  // 该调试任务的名字，启动调试时会在待选列表中显示
+            &quot;type&quot;: &quot;cppdbg&quot;,
+            &quot;request&quot;: &quot;launch&quot;,
+            &quot;program&quot;: &quot;${fileDirname}\\${fileBasenameNoExtension}.exe&quot;,
+            &quot;args&quot;: [],
+            &quot;stopAtEntry&quot;: false,  // 这一项控制是否在入口处暂停，默认false不暂停，改为true暂停
+            &quot;cwd&quot;: &quot;${workspaceFolder}&quot;,
+            &quot;environment&quot;: [],
+            &quot;externalConsole&quot;: false,  // 这一项控制是否启动外部控制台（独立的黑框）运行程序，默认false表示在集成终端中运行
+            &quot;MIMode&quot;: &quot;gdb&quot;,
+            &quot;miDebuggerPath&quot;: &quot;C:\\mingw64\\bin\\gdb.exe&quot;,  // 调试器路径，必须与你自己的电脑相符
+            &quot;setupCommands&quot;: [
+                {
+                    &quot;description&quot;: &quot;为 gdb 启用整齐打印&quot;,
+                    &quot;text&quot;: &quot;-enable-pretty-printing&quot;,
+                    &quot;ignoreFailures&quot;: true
+                }
+            ],
+            &quot;preLaunchTask&quot;: &quot;C/C++: gcc.exe build active file&quot;  // 调试前的预执行任务，这里的值是tasks.json文件中对应的编译任务，也就是调试前需要先编译
+        }
+    ]
+}
+</code></pre>
+<p>VSCode 根据这个 Json 中的配置调用 GDB 进行调试，这属于最简单、最基础的一种情况。但是对于大型项目的 debug 需要做许多其他的工作。</p>
+<h1 id="如何解决符号加载时间过长的问题">如何解决符号加载时间过长的问题</h1>
+<p>在编译过程中有动态加载和静态加载两种方式，在 Linux 上，程序加载 .so 文件是动态加载，在一个大型项目项目中，可能有几十个 .so 文件，每一个 .so 文件中对应一个模块，就单个工程师而言，其工作范围集中在一两个模块，那么调试的对象也就是这一两个模块，GDB在调试时需要加载 .so 文件利用其中的调试信息，如果 GDB 选择加载所有的 .so 文件，会十分耗时，理想的方法是只加载所需要调试的 .so 文件。<br>
+以下是如何配置 VSCode 以实现这一目标的步骤：</p>
+<pre><code class="language-json">&quot;symbolLoadInfo&quot;: {
+    &quot;loadAll&quot;: false, // similar to set auto-solib-add off
+    &quot;exceptionList&quot;: &quot;*example*&quot; // only load the library that matches the pattern
+    },
+</code></pre>
+<p>这样的配置确保 GDB 只加载与当前调试任务相关的动态库，显著减少等待时间。</p>
+<h1 id="如何解决在docker中的调试">如何解决在docker中的调试</h1>
+<p>相比于 Jetbrains 系列的IDE， VScode 一个十分突出的优点就是<s>不要钱</s>，不是（手动狗头），就是其优秀的远程开发的能力，无论是远程的服务器、还是本地的 Docker、更有甚者，包括远程服务器上面Docker， VScode 装上相关插件后，都可以获得类似本地工作的体验。对于在 Docker 中调试需要安装这个插件，Docker和这个插件的具体教程可以查看官方文档。<br>
+<img src="https://WatsonShum.github.io/post-images/1716713597533.png" alt="" loading="lazy"></p>
+<h1 id="如何解决环境配置复杂的问题">如何解决环境配置复杂的问题</h1>
+<p>GDB 调试有两种方法，一种是 launch，另一种是 attach，launch 就是使用 GDB 直接启动这个程序，attach 是先启动程序，然后  GDB 附加上去进行调试。使用 launch 的调试体验更好，但是如果程序依赖的环境变量是由脚本动态生成的，这时候实现 launch 就比较难，最好的方法是使用 attach，对此需要修改相应的 VSCode debug 配置。主要需要修改的是以下两个字段:</p>
+<pre><code class="language-json">  &quot;request&quot;: &quot;attach&quot;,  // request and launch
+  &quot;processId&quot;: &quot;${command:pickProcess}&quot;, // a special variable to pick process
+</code></pre>
+<p>其中<code>${command:pickProcess}</code> 是一个特殊的变量，需要在程序运行起来后，用户手动选择调试的程序。</p>
+<h1 id="如何在docker中寻找到代码">如何在Docker中寻找到代码</h1>
+<p>GDB 调试需要使用源代码，但是由于 Docker中并不含有源代码，代码在宿主机中，首先需要将源代码拷贝到 Docker 中，有以下的方法：</p>
+<ul>
+<li>使用 <code>docker cp</code> 命令，代码改动后，需要手动拷贝，比较耗时费力。</li>
+<li>使用 docker volume 挂载源代码目录，一次挂载，代码之后可以自动更新。</li>
+<li>使用 docker mount 挂载源代码目录，一次挂载，代码之后可以自动更新。</li>
+</ul>
+<p>对于 <code>docker volume</code>  和 <code>docker mount</code> 都需要在创建 container 之前就使用，如果 container已经运行起来了，有没有办法挂载文件夹到 container 上呢，也是有的，详情可以参考 StackOverflow 的回答：<a href="https://stackoverflow.com/questions/28302178/how-can-i-add-a-volume-to-an-existing-docker-container">相关链接</a>。</p>
+<p>在把源码拷贝到 Docker 容器中后，还需要确保 GDB 能够在 Docker 正确匹配源代码，使用GDB的 <code>dir</code>命令，在 VSCode 中配置 GDB 命令的方法如下：</p>
+<pre><code class="language-json">&quot;setupCommands&quot;: [
+    {
+        &quot;description&quot;: &quot;add dir&quot;,
+        &quot;text&quot;: &quot;dir /path_of_your_source,
+        &quot;ignoreFailures&quot;: true
+    },
+}
+</code></pre>
+<p>经过这样配置后，通常 GDB 能够找到源代码路径。</p>
+<h1 id="最终配置文件">最终配置文件</h1>
+<p>总结上面的各种要素，可以得到一份下面的配置文件。</p>
+<pre><code class="language-json">{
+    &quot;version&quot;: &quot;0.2.0&quot;,
+    &quot;configurations&quot;: [
+        {
+            &quot;name&quot;: &quot;Attach to Process&quot;,
+            &quot;type&quot;: &quot;cppdbg&quot;, // privided by C/C++ extension
+            &quot;program&quot;: &quot;/path_to_your_program&quot;, // similar to gdb file command
+            &quot;request&quot;: &quot;attach&quot;, // request and launch
+            &quot;processId&quot;: &quot;${command:pickProcess}&quot;, // a special variable to pick process
+            &quot;MIMode&quot;: &quot;gdb&quot;,
+            &quot;miDebuggerPath&quot;: &quot;/usr/bin/gdb&quot;,
+            // &quot;logging&quot;: {
+            //     &quot;engineLogging&quot;: true
+            // },
+            &quot;cwd&quot;: &quot;cwd&quot;,
+            &quot;symbolLoadInfo&quot;: {
+                &quot;loadAll&quot;: false, // similar to set auto-solib-add off
+                &quot;exceptionList&quot;: &quot;*example*&quot; // only load the library that matches the pattern
+            },
+            &quot;additionalSOLibSearchPath&quot;: &quot;/home/caros/cybertron/lib&quot;,
+            &quot;setupCommands&quot;: [
+                {
+                    &quot;description&quot;: &quot;Enable pretty-printing for gdb&quot;,
+                    &quot;text&quot;: &quot;-enable-pretty-printing&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Set verbose on&quot;,
+                    &quot;text&quot;: &quot;-gdb-set verbose on&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn off auto-solib-add&quot;,
+                    &quot;text&quot;: &quot;-gdb-set auto-solib-add on&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn on lazy load&quot;,
+                    &quot;text&quot;: &quot;-gdb-set lazy-load-symbols off &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn off range stepping&quot;,
+                    &quot;text&quot;: &quot;-gdb-set range-stepping off &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;Turn on startup-with-shell&quot;,
+                    &quot;text&quot;: &quot;-gdb-set startup-with-shell on &quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+                {
+                    &quot;description&quot;: &quot;add dir&quot;,
+                    &quot;text&quot;: &quot;dir /path_to_your_source_code&quot;,
+                    &quot;ignoreFailures&quot;: true
+                },
+            ],
+        }
+    ]
+}
+
+</code></pre>
+<p>经过上面的操作就可以使用 VSCode 连接 Docker ，然后在里面进行 debug 操作了。</p>
+<h1 id="总结">总结</h1>
+<p>随着代码工程规模的扩大，会逐渐出现两个问题，第一个是编译时间过长的问题，第二个是运行环境不统一的问题，为了解决这两个问题，可以使用云端编译和 Docker 等技术，但是会破坏 debug 的能力。本文综合了 GDB、Docker、VSCode 、编译原理等知识，重建了整个能力，有利于提高开发新功能和排查问题的效率。</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E8%83%8C%E6%99%AF">背景</a></li>
+<li><a href="#%E8%B0%83%E8%AF%95%E7%9A%84%E5%8E%9F%E7%90%86">调试的原理</a></li>
+<li><a href="#%E5%A6%82%E4%BD%95%E8%A7%A3%E5%86%B3%E7%AC%A6%E5%8F%B7%E5%8A%A0%E8%BD%BD%E6%97%B6%E9%97%B4%E8%BF%87%E9%95%BF%E7%9A%84%E9%97%AE%E9%A2%98">如何解决符号加载时间过长的问题</a></li>
+<li><a href="#%E5%A6%82%E4%BD%95%E8%A7%A3%E5%86%B3%E5%9C%A8docker%E4%B8%AD%E7%9A%84%E8%B0%83%E8%AF%95">如何解决在docker中的调试</a></li>
+<li><a href="#%E5%A6%82%E4%BD%95%E8%A7%A3%E5%86%B3%E7%8E%AF%E5%A2%83%E9%85%8D%E7%BD%AE%E5%A4%8D%E6%9D%82%E7%9A%84%E9%97%AE%E9%A2%98">如何解决环境配置复杂的问题</a></li>
+<li><a href="#%E5%A6%82%E4%BD%95%E5%9C%A8docker%E4%B8%AD%E5%AF%BB%E6%89%BE%E5%88%B0%E4%BB%A3%E7%A0%81">如何在Docker中寻找到代码</a></li>
+<li><a href="#%E6%9C%80%E7%BB%88%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6">最终配置文件</a></li>
+<li><a href="#%E6%80%BB%E7%BB%93">总结</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/unreal-xue-xi/">
+              <h3 class="post-title">
+                Unreal5.0学习
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

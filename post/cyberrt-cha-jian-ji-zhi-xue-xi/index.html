@@ -1,0 +1,462 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CyberRT 插件机制源码阅读 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="CyberRT 插件机制源码阅读 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="原因
+Apollo实现了一个插件系统，其他模块例如 Planning、Perception 没有直接静态编译集成到主程序中，而是单独编译成一个动态库，CyberRT 动态加载这些模块，本质上就是一个插件系统。
+自己之前也写过插件系统，并将整..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              CyberRT 插件机制源码阅读
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-04-11
+              </span>
+              <span>
+                13 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/cyberrt-cha-jian-ji-zhi-xue-xi.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="原因">原因</h1>
+<p>Apollo实现了一个插件系统，其他模块例如 Planning、Perception 没有直接静态编译集成到主程序中，而是单独编译成一个动态库，CyberRT 动态加载这些模块，本质上就是一个插件系统。</p>
+<p>自己之前也写过插件系统，并将整个过程总结成了<a href="https://watsonshum.github.io/post/cpp-shi-xian-yi-ge-cha-jian-xi-tong/">Blog</a>,说到底原理也比较简单，就是利用了动态库的符号，关于符号我也进行了专门的学习并总结成了<a href="https://watsonshum.github.io/post/cpp-conf-xue-xi/">Blog</a>,利用符号不仅 C++ 可以调用 C++ 的代码，其他语言也都可以调用 C++ 的代码，Apollo 插件系统的底层实现原理也是一样的，只是在工程上做了更精细的 OOP 封装以及添加了更多其他的逻辑，Apollo 的代码分层得很好，将插件机制单独抽离了出来，然后使用这个机制完成业务逻辑，所以接下来也是分两个层次来阅读代码，第一部分是基础机制，第二部分是业务应用。</p>
+<h1 id="基础机制">基础机制</h1>
+<p>在代码库中与插件系统相关的主要有以下几个类：</p>
+<ul>
+<li><code>SharedLibrary</code></li>
+<li><code>ClassFactory</code></li>
+<li><code>ClassLoader</code></li>
+<li><code>ClassLoaderManager</code></li>
+</ul>
+<p>除此之外还有一些函数，下面进行详细介绍。</p>
+<h2 id="sharedlibrary">SharedLibrary</h2>
+<p>这个类表示一个动态库，对打开动态库获取符号等常用操作进行了一些封装：</p>
+<ul>
+<li><code>Load(const std::string&amp; path, int flags)</code>，根据文件路径使用<code>dlopen</code>加载动态库</li>
+<li><code>GetSymbol(const std::string&amp; name) </code>，使用<code>dlsym</code>获取符号</li>
+<li><code>Unload()</code>使用<code>dlclose</code>卸载动态库</li>
+</ul>
+<h2 id="插件自动注册机制">插件自动注册机制</h2>
+<p>对于插件加载，最直观的思路是调用动态库的Text Symbol 获得一个函数，然后调用这个函数返回一个类的实例，这个的思路是主体程序去加载插件，Apollo使用了另外的一种思路，插件会自动注册到主体程序中，核心代码是这一个宏：</p>
+<pre><code class="language-c++">#define CLASS_LOADER_REGISTER_CLASS_INTERNAL(Derived, Base, UniqueID)     \
+  namespace {                                                             \
+  struct ProxyType##UniqueID {                                            \
+    ProxyType##UniqueID() {                                               \
+      apollo::cyber::class_loader::utility::RegisterClass&lt;Derived, Base&gt;( \
+          #Derived, #Base);                                               \
+    }                                                                     \
+  };                                                                      \
+  static ProxyType##UniqueID g_register_class_##UniqueID;                 \
+  }
+
+#define CLASS_LOADER_REGISTER_CLASS_INTERNAL_1(Derived, Base, UniqueID) \
+  CLASS_LOADER_REGISTER_CLASS_INTERNAL(Derived, Base, UniqueID)
+
+// register class macro
+#define CLASS_LOADER_REGISTER_CLASS(Derived, Base) \
+  CLASS_LOADER_REGISTER_CLASS_INTERNAL_1(Derived, Base, __COUNTER__)
+
+#endif  // CYBER_CLASS_LOADER_CLASS_LOADER_REGISTER_MACRO_H_
+</code></pre>
+<p>插件只需要在自己的代码中使用这一段宏，就能够在使用<code>dlopen</code>的时候自动地注册到主体程序中，其实现原理如下：</p>
+<ul>
+<li>定义了一个struct，然后在这个struct的构造函数中调用了<code>RegisterClass&lt;Derived, Base&gt;(DerivedName,BaseName)</code>，然后在匿名空间中创建了对应struct的静态变量，由于静态变量会在最开始初始化，初始化的时候会自动调用构造函数，所以在<code>dlopen</code>的时候就能够自动调用注册函数，从而注册到主程序中。</li>
+<li>主体程序的相关符号的可见效设置成visibility，插件就可以找到对应的符号。在加载插件的时候<code>dlopen</code>使用<code>RTLD_GLOBAL</code>标志，插件就能访问主程序中已经加载的符号，所以也就能成功调用 <code>RegisterClass</code>函数。</li>
+<li>使用<code>__COUNTER__</code>来拼接类的名称，实现了类名称的唯一性，这样在同一个源文件里面也可以多次使用这个宏，不会导致符号冲突。</li>
+</ul>
+<h2 id="工厂机制创建插件实例">工厂机制创建插件实例</h2>
+<p>上面可以看到插件会自动调用<code>RegisterClass</code>函数注册到主体程序，接下来分析一下主体程序如何具体实例化插件的，采用的核心数据结构是一个嵌套哈希表。</p>
+<pre><code class="language-c++">using ClassClassFactoryMap =std::map&lt;std::string, utility::AbstractClassFactoryBase*&gt;;
+using BaseToClassFactoryMapMap = std::map&lt;std::string, ClassClassFactoryMap&gt;;
+</code></pre>
+<pre><code>BaseToClassFactoryMapMap
+│
+├── &quot;BaseA&quot; → ClassClassFactoryMap
+│       ├── &quot;DerivedA1&quot; → ClassFactory&lt;A1, BaseA&gt;
+│       └── &quot;DerivedA2&quot; → ClassFactory&lt;A2, BaseA&gt;
+└── &quot;BaseB&quot; → ClassClassFactoryMap
+        └── &quot;DerivedB1&quot; → ClassFactory&lt;B1, BaseB&gt;
+</code></pre>
+<p>这个哈希表最外层的键是<code>typeid(Base).name()</code>，里层的Key是<code>class_name</code>，里层的值是 ClassFactory 对象。有一个值得注意的细节是最外层的没有直接使用<code>base_class_name</code>，这是因为如果多个动态库都定义相同名称的Base Class，那么加载的时候就会冲突，但是如果使用<code>typeid(Base).name()</code>借助Name Mangling就可以解决这个问题。针对这个哈希表主要有两种操作，</p>
+<ol>
+<li>
+<p>通过<code>RegisterClass</code>函数往哈希表加元素</p>
+<pre><code class="language-c++">template &lt;typename Derived, typename Base&gt;
+void RegisterClass(const std::string&amp; class_name,
+                   const std::string&amp; base_class_name) {
+  utility::AbstractClassFactory&lt;Base&gt;* new_class_factory_obj =
+      new utility::ClassFactory&lt;Derived, Base&gt;(class_name, base_class_name);
+  new_class_factory_obj-&gt;AddOwnedClassLoader(GetCurActiveClassLoader());
+  new_class_factory_obj-&gt;SetRelativeLibraryPath(GetCurLoadingLibraryName());
+
+  GetClassFactoryMapMapMutex().lock();
+  ClassClassFactoryMap&amp; factory_map =
+      GetClassFactoryMapByBaseClass(typeid(Base).name());
+  factory_map[class_name] = new_class_factory_obj;
+  GetClassFactoryMapMapMutex().unlock();
+}
+</code></pre>
+<p>可以看到这个函数做的主要工作就有两个：</p>
+<ol>
+<li>根据Base和Derived的类型创建一个Class Factory对象，这里使用了工厂模式，之后能够使用这个工厂来</li>
+<li>将这个对象储存在一个嵌套哈希表中。</li>
+</ol>
+</li>
+<li>
+<p>通过<code>CreateClassObj</code>访问嵌套哈希表调用工厂创建相应的实例：</p>
+<pre><code class="language-c++">template &lt;typename Base&gt;
+Base* CreateClassObj(const std::string&amp; class_name, ClassLoader* loader) {
+  GetClassFactoryMapMapMutex().lock();
+  ClassClassFactoryMap&amp; factoryMap = GetClassFactoryMapByBaseClass(typeid(Base).name());//根据base类型获取里层哈希表
+  AbstractClassFactory&lt;Base&gt;* factory = nullptr;
+  if (factoryMap.find(class_name) != factoryMap.end()) {
+    factory = dynamic_cast&lt;utility::AbstractClassFactory&lt;Base&gt;*&gt;(//找到对应的工厂
+        factoryMap[class_name]);
+  }
+  GetClassFactoryMapMapMutex().unlock();
+
+  Base* classobj = nullptr;
+  if (factory &amp;&amp; factory-&gt;IsOwnedBy(loader)) {
+    classobj = factory-&gt;CreateObj();//调用工厂创建相应的实例
+  }
+  return classobj;
+}
+</code></pre>
+</li>
+</ol>
+<p>有一点儿小细节想探讨一下，可以看到上面函数中一些变量都是通过函数获取的，比如<code>GetClassFactoryMapMapMutex()</code>,如果去看它的定义会发现十分简单：</p>
+<pre><code class="language-c++">BaseToClassFactoryMapMap&amp; GetClassFactoryMapMap() {
+  static BaseToClassFactoryMapMap instance;
+  return instance;
+}
+</code></pre>
+<p>理论上即使使用一个全局变量也可以达到相似的效果，为什么要多此一举呢，这样写的好处是可以解决全局变量初始化顺序的问题。如果<code>a</code>变量引用了<code>b</code>变量，可能<code>b</code>这时候还没有初始化，那么就会报错。但是通过上面的函数方式来获取，就相当于实现了懒加载。但是反而保证了这个变量被调用时肯定是可用的。单例模式也是这种写法， Apollo在这儿也利用了这种懒加载的方法，<code>class_loader_utility.h</code>里面的变量基本上都通过这种方法进行了封装。</p>
+<h2 id="工厂类">工厂类</h2>
+<p>上面提到了Class Factory，只提到了如何使用，下面看一下具体定义的核心代码</p>
+<pre><code class="language-C++">template &lt;typename Base&gt;
+class AbstractClassFactory : public AbstractClassFactoryBase {
+ public:
+  AbstractClassFactory(const std::string&amp; class_name,
+                       const std::string&amp; base_class_name)
+      : AbstractClassFactoryBase(class_name, base_class_name) {}
+
+  virtual Base* CreateObj() const = 0;
+
+ private:
+  AbstractClassFactory();
+  AbstractClassFactory(const AbstractClassFactory&amp;);
+  AbstractClassFactory&amp; operator=(const AbstractClassFactory&amp;);
+};
+
+template &lt;typename ClassObject, typename Base&gt;
+class ClassFactory : public AbstractClassFactory&lt;Base&gt; {
+ public:
+  ClassFactory(const std::string&amp; class_name,
+               const std::string&amp; base_class_name)
+      : AbstractClassFactory&lt;Base&gt;(class_name, base_class_name) {}
+
+  Base* CreateObj() const { return new ClassObject; }
+};
+</code></pre>
+<p>算上template class 里面一共涉及了三个class</p>
+<ul>
+<li><code>AbstractClassFactoryBase</code>一个作用就是作为指针指向子类，被放到一个数据结构中，然后能够实现多态。</li>
+<li><code>template &lt;typename Base&gt; class AbstractClassFactory</code>作用是一样的，也是为了实现多态，相比于上者多了一个<code>CreateObj</code>函数。</li>
+<li><code>template &lt;typename ClassObject, typename Base&gt; class ClassFactory</code>真正的实现，实际上利用多态调用的是这一层的函数。</li>
+</ul>
+<p>嵌套哈希表中储存的是<code>AbstractClassFactoryBase</code>指针，所以在<code>CreateClassObj</code>函数中调用时还需要根据传进来的模板参数进行<code>dynami_cast</code>然后才能使用。</p>
+<h2 id="插件实例的生命周期管理">插件实例的生命周期管理</h2>
+<p><code>ClassFactory</code>返回的是一个裸指针，一般来说为了内存安全都会使用一个数据结构将这个裸指针存起来，在适当的时候再调用对应的析构函数。但是Apollo采取了一个更加优雅的解决方案。定义了<code>ClassLoader</code>来更加智能的追踪和管理创建出来的插件实例。它主要做了三件事情：</p>
+<ol>
+<li>
+<p>创建出来的裸指针用<code>std::shared_ptr</code>包裹，自定义了删除器函数<code>ClassLoader::OnClassObjDeleter&lt;Base&gt;</code></p>
+<pre><code class="language-c++">template &lt;typename Base&gt;
+std::shared_ptr&lt;Base&gt; ClassLoader::CreateClassObj(
+    const std::string&amp; class_name) {
+  if (!IsLibraryLoaded()) {
+    LoadLibrary();
+  }
+
+  Base* class_object = utility::CreateClassObj&lt;Base&gt;(class_name, this);
+  if (class_object == nullptr) {
+    AWARN &lt;&lt; &quot;CreateClassObj failed, ensure class has been registered. &quot;
+          &lt;&lt; &quot;classname: &quot; &lt;&lt; class_name &lt;&lt; &quot;,lib: &quot; &lt;&lt; GetLibraryPath();
+    return std::shared_ptr&lt;Base&gt;();
+  }
+
+  std::lock_guard&lt;std::mutex&gt; lck(classobj_ref_count_mutex_);
+  classobj_ref_count_ = classobj_ref_count_ + 1;
+  std::shared_ptr&lt;Base&gt; classObjSharePtr(
+      class_object, std::bind(&amp;ClassLoader::OnClassObjDeleter&lt;Base&gt;, this,
+                              std::placeholders::_1));
+  return classObjSharePtr;
+}
+
+template &lt;typename Base&gt;
+void ClassLoader::OnClassObjDeleter(Base* obj) {
+  if (nullptr == obj) {
+    return;
+  }
+  delete obj;
+  std::lock_guard&lt;std::mutex&gt; lck(classobj_ref_count_mutex_);
+  --classobj_ref_count_;
+}
+</code></pre>
+</li>
+<li>
+<p>维护了<code>classobj_ref_count_</code>变量和 <code>loadlib_ref_count_</code>变量，分别用来跟踪现存的插件实例数量和动态库加载次数。采取了类似引用技术的机制，在创建类实例的时候增加<code>classobj_ref_count_</code>，在自定的删除器中减少<code>classobj_ref_count_</code>。当所有插件实例都销毁后<code>classobj_ref_count_</code>就能够变为0，就可以安全地卸载这个动态库。</p>
+<pre><code class="language-c++">int ClassLoader::UnloadLibrary() {
+  std::lock_guard&lt;std::mutex&gt; lckLib(loadlib_ref_count_mutex_);
+  std::lock_guard&lt;std::mutex&gt; lckObj(classobj_ref_count_mutex_);
+
+  if (classobj_ref_count_ &gt; 0) {
+    AINFO &lt;&lt; &quot;There are still classobjs have not been deleted, &quot;
+             &quot;classobj_ref_count_: &quot;
+          &lt;&lt; classobj_ref_count_;
+  } else {
+    --loadlib_ref_count_;
+    if (loadlib_ref_count_ == 0) {//检查加载的所有实例都已经销毁
+      utility::UnloadLibrary(library_path_, this);
+    } else {
+      if (loadlib_ref_count_ &lt; 0) {
+        loadlib_ref_count_ = 0;
+      }
+    }
+  }
+  return loadlib_ref_count_;
+}
+</code></pre>
+</li>
+</ol>
+<h2 id="classloadermanager">ClassLoaderManager</h2>
+<p><code>ClassLoader</code>针对的是一个动态库，如果有多个插件，也需要管理，所以又封装了一个<code>ClassLoaderManager</code>来管理，其核心的数据结构就是<code>std::map&lt;std::string, ClassLoader*&gt; libpath_loader_map_;</code>，相当于将一个动态库的路径和一个ClassLoader对应起来，这样用来管理所有插件相关的动态库。有一个疑问是为什么不使用<code>std::unordered_map</code>，好像也没有有序性的要求，但是这个细节不影响整体理解。</p>
+<h1 id="业务应用">业务应用</h1>
+<p>上面分析了整个插件系统的基础机制，下面是和CyberRT核心概念结合更加紧密的应用。我们可以从两个方向来探讨，第一个是插件端，第二个是主体程序。由于是应用，比较简单。</p>
+<h2 id="插件端">插件端</h2>
+<p>在CyberRT中每一个Component就是一个插件，所以在<code>component.h</code>中对于<code>CLASS_LOADER_REGISTER_CLASS</code>进行了进一步的封装：</p>
+<pre><code class="language-C++">#define CYBER_REGISTER_COMPONENT(name) \
+  CLASS_LOADER_REGISTER_CLASS(name, apollo::cyber::ComponentBase)
+</code></pre>
+<p>将Base 固化为了<code>apollo::cyber::ComponentBase</code>，然后这个宏就在所有的Component中使用，将Component作为插件加载到CyberRT系统中，比如：</p>
+<ul>
+<li>在<code>monitor.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(Monitor)</code></li>
+<li>在<code>lidar_driver_component.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(LidarDriverComponent)</code></li>
+<li>在<code>pointcloud_preprocess_component.h</code>中使用了<code>CYBER_REGISTER_COMPONENT(PointCloudPreprocessComponent);</code></li>
+</ul>
+<h2 id="主体程序">主体程序</h2>
+<p>在<code>ModuleController</code>中有一个<code>ClassLoaderManager class_loader_manager_</code>成员变量，在之后的<code>LoadModule</code>使用这个变量加载Component。这个<code>ModuleController::LoadModule</code>会在函数程序初始化地时候被调用。</p>
+<pre><code class="language-c++">/**删除了无关代码*/
+bool ModuleController::LoadModule(const DagConfig&amp; dag_config) {
+  for (auto module_config : dag_config.module_config()) {
+    std::string load_path;
+    if (!common::GetFilePathWithEnv(module_config.module_library(),
+                                    &quot;APOLLO_LIB_PATH&quot;, &amp;load_path)) {
+      AERROR &lt;&lt; &quot;no module library [&quot; &lt;&lt; module_config.module_library()
+             &lt;&lt; &quot;] found!&quot;;
+      return false;
+    }
+    AINFO &lt;&lt; &quot;mainboard: use module library &quot; &lt;&lt; load_path;
+
+    class_loader_manager_.LoadLibrary(load_path);
+
+    for (auto&amp; component : module_config.components()) {
+      const std::string&amp; class_name = component.class_name();
+      std::shared_ptr&lt;ComponentBase&gt; base =
+          class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name);
+      if (base == nullptr || !base-&gt;Initialize(component.config())) {
+        return false;
+      }
+      component_list_.emplace_back(std::move(base));
+    }
+
+    for (auto&amp; component : module_config.timer_components()) {
+      const std::string&amp; class_name = component.class_name();
+      std::shared_ptr&lt;ComponentBase&gt; base =
+          class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name);
+      if (base == nullptr || !base-&gt;Initialize(component.config())) {
+        return false;
+      }
+      component_list_.emplace_back(std::move(base));
+    }
+  }
+  return true;
+</code></pre>
+<p>可以看到两类Component都是使用<code>class_loader_manager_.CreateClassObj&lt;ComponentBase&gt;(class_name)</code>加载的。当然会有一些解析配置文件的前置工作，不过那不是核心逻辑。</p>
+<h1 id="小结">小结</h1>
+<p>虽然自己之前也做过插件系统，有一些经验，但是这次阅读还是有很多让我印象深刻的技术点，主要是三个：</p>
+<ul>
+<li>插件的自动注册机制</li>
+<li>使用工厂来自动创建插件实例</li>
+<li>对于插件实例生命周期的追踪和管理</li>
+</ul>
+<p>这三个功能的实现都是建立在C++语言机制的熟练应用基础上的，体现出了开发者优秀的技术水平，</p>
+<p>此外分层合理，将基础功能与上层应用分得很开。基础功能可以直接拷贝然后应用到其他项目中，对于 OOP 的建模十分地精细。除此之外还涉及到了许多编译的知识，不得不说整个框架设计得很好。</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E5%8E%9F%E5%9B%A0">原因</a></li>
+<li><a href="#%E5%9F%BA%E7%A1%80%E6%9C%BA%E5%88%B6">基础机制</a>
+<ul>
+<li><a href="#sharedlibrary">SharedLibrary</a></li>
+<li><a href="#%E6%8F%92%E4%BB%B6%E8%87%AA%E5%8A%A8%E6%B3%A8%E5%86%8C%E6%9C%BA%E5%88%B6">插件自动注册机制</a></li>
+<li><a href="#%E5%B7%A5%E5%8E%82%E6%9C%BA%E5%88%B6%E5%88%9B%E5%BB%BA%E6%8F%92%E4%BB%B6%E5%AE%9E%E4%BE%8B">工厂机制创建插件实例</a></li>
+<li><a href="#%E5%B7%A5%E5%8E%82%E7%B1%BB">工厂类</a></li>
+<li><a href="#%E6%8F%92%E4%BB%B6%E5%AE%9E%E4%BE%8B%E7%9A%84%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F%E7%AE%A1%E7%90%86">插件实例的生命周期管理</a></li>
+<li><a href="#classloadermanager">ClassLoaderManager</a></li>
+</ul>
+</li>
+<li><a href="#%E4%B8%9A%E5%8A%A1%E5%BA%94%E7%94%A8">业务应用</a>
+<ul>
+<li><a href="#%E6%8F%92%E4%BB%B6%E7%AB%AF">插件端</a></li>
+<li><a href="#%E4%B8%BB%E4%BD%93%E7%A8%8B%E5%BA%8F">主体程序</a></li>
+</ul>
+</li>
+<li><a href="#%E5%B0%8F%E7%BB%93">小结</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-cyberrt-mo-kuai-qian-du/">
+              <h3 class="post-title">
+                CyberRT 事件系统源码阅读 
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

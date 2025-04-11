@@ -1,0 +1,563 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CppConf：How Linux Elf Symbols Work学习 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="CppConf：How Linux Elf Symbols Work学习 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="起因
+自己最近在工作中涉及到了一些符号相关的问题，之前工作的时候都是使用bazel之类的mono repo解决方案，所以没怎么遇到过符号冲突的问题，即使冲突了解决起来也比较简单，将冲突的库都改成动态库就好了，但是最近工作开始使用CMake，..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              CppConf：How Linux Elf Symbols Work学习
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-03-24
+              </span>
+              <span>
+                17 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/cpp-conf-xue-xi.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="起因">起因</h1>
+<p>自己最近在工作中涉及到了一些符号相关的问题，之前工作的时候都是使用bazel之类的mono repo解决方案，所以没怎么遇到过符号冲突的问题，即使冲突了解决起来也比较简单，将冲突的库都改成动态库就好了，但是最近工作开始使用CMake，或者直接链接一个单独的.so库，然后就遇到了符号冲突的问题。一个现实的例子是，我的主程序A链接了glog，glog会生成一个全局符号，然后A链接了B，B使用glog，然后也会生成相同的全局符号，最后导致出现了符号冲突。最终由于项目结构限制，没办法修改链接方式，最终只能放弃使用glog，使用其他日志库，才解决了这个问题。期间试过许多解决方案，比如修改链接方式，使用符号隐藏，虽然最终没有采取这些方案，但是让我感受到了学习符号相关知识的必要性。于是自己寻找了Youtube上一个Cpp Conf的演讲<a href="https://www.youtube.com/watch?v=X2jFjeCDOYw">How Linux Elf Symbols Work and How They Are Used in C++ and C Programming - Anders Schau Knatten</a>，看完后大受启发，之前许多模糊不清的地方也拨云见日了，于是记录一下。</p>
+<h1 id="separate-compilation-model">Separate Compilation Model</h1>
+<p>C/C++编译流程四步：</p>
+<ul>
+<li>Preprocessing，主要就是宏展开，比如<code>#include &lt;XXX&gt;</code>就是对头文件进行复制粘贴</li>
+<li>Compilation，以每一个源文件为单位，被称为<code>Translation Unit</code>，简称<code>TU</code>，生成对应的汇编代码</li>
+<li>Assembly，对于每一个TU，将汇编代码进一步转换成二进制，这时候格式已经是ELF格式。通常以<code>.o</code>结尾，被称为目标文件。</li>
+<li>Linking，将之前所有的目标文件，生成可执行文件，或者动态链接文件。这两者也是使用ELF格式。</li>
+</ul>
+<p>其中前三个步骤都是并行的，互不影响的，所以可以使用多线程编译，可以传入类似 <code>-j=4</code>的参数来控制并行的数量。<br>
+<img src="https://WatsonShum.github.io/post-images/1743062534445.png" alt="" loading="lazy"></p>
+<p>值得注意的时候在Assembly和Linking阶段都是使用的ELF文件格式，只是后缀名会有所不同。</p>
+<h2 id="基本概念">基本概念</h2>
+<ul>
+<li>TU （Translation Unit），每一个源文件会形成一个Tranlation Unit</li>
+<li>DSO （Dynamic Shared Object），在不同的平台上名称不一样，在Windows上被称为DLL，在Linux上被称为Shared Object、Dynamic Library等，为了方便统一称为DSO。</li>
+</ul>
+<h2 id="elf-format">ELF Format</h2>
+<p>C++ 23标准有2124页，但是没有一页是关于动态链接的，因为这些都是vender specific，每家都有自己的实现方案：</p>
+<ul>
+<li>在Linux上面是ELF格式，ELF全称是 Executable and Linkable Format。</li>
+<li>macOS（及iOS等Apple系统）：使用 Mach-O（Mach Object），是macOS原生二进制文件的格式（如无扩展名的可执行文件，或.dylib、.bundle）。</li>
+<li>Windows：使用 PE（Portable Executable），扩展自COFF格式，常见于.exe、.dll、.sys等文件。</li>
+</ul>
+<p>视频使用的是ELF格式为例来进行讲解，ELF比较重要的几个Section有：</p>
+<ul>
+<li>.text 存储代码</li>
+<li>.data 存储变量</li>
+<li>.bss 存储未初始化的全局和静态变量</li>
+<li>.symtab 存储符号，符号指向具体的.data .bss 等section</li>
+<li>.dynsym</li>
+</ul>
+<h2 id="相关工具">相关工具</h2>
+<p>关于读取ELF格式有以下工具，nm，readef，strip。</p>
+<ul>
+<li><code>nm</code>命令作用是输出符号信息，这个名字的来源是在老版本的Unix 7系统中，symbol table被称为name list。</li>
+<li><code>readelf</code>，从名字可以发现<code>nm</code>主要关注name list(symbol table)，但是readelf关注整个 elf 文件，所以整体上<code>readelf</code> 比 <code>nm</code>的功能更加强大，我们可以传入<code>-s</code>参数来读取符号表，也可以传入其他参数，比如<code>-h</code>读取elf header。</li>
+<li><code>strip</code> 可以用来去除符号。</li>
+</ul>
+<h2 id="为什么需要symbol">为什么需要Symbol</h2>
+<p>Symbol本质上可以类比为指针，两者有相同的作用，会记录函数或者变量的具体地址，例如Text Symbol就指向了.text Section 里面存储的代码，C++采取分离编译模型，假设TU A引用了 TU B的内容，链接阶段链接器会使用对应的符号信息找到引用的内容。同理在动态加载DSU的时候也需要使用Symbol来确定调用的函数的地址。所以无论是编译还是链接都需要使用Symbol。</p>
+<h1 id="binding-vs-visibility">Binding vs Visibility</h1>
+<ul>
+<li>Binding指的当前TU的符号是否可以被其他TU访问，比如匿名空间里面的函数，static修饰的全局变量，对于其他TU就是不可以访问的，BInding影响DSU的创建过程。</li>
+<li>Visibility指的是当前DSU的符号对于其他DSU或者可执行文件是否能够访问。影响的是DSU的链接过程。</li>
+</ul>
+<p>在Linux上Visibility有两种，hidden和 default。我们有两种方法可以控制：</p>
+<ol>
+<li>
+<p>设置编译器属性<code>-fvisibility=hidden</code>来修改可见性，这个影响整个DSU</p>
+</li>
+<li>
+<p>使用<code>__attribute__((visibility(default|hidden)))</code>修饰来控制可见性。通常我们会将这一长串封装成一个宏。</p>
+<pre><code class="language-c++">__attribute__((visibility(&quot;default&quot;))) int api_function();
+</code></pre>
+</li>
+</ol>
+<p>值得注意的是，第二种方法的优先级高于第一种。也就是即使整个DSU符号可见效设置成隐藏，但是对于具体的函数或变量仍然可以将自己的可见性显示设置成可见。</p>
+<p>使用<code>readelf -s [target]</code>命令，可以同时看到符号的Binding和 Visibility。</p>
+<p>可见效的设置是十分必要的，有以下几点考虑：</p>
+<ul>
+<li>在将DSU提供给外部使用的时候，只需要将需要的API暴露，对于不想暴露的可以将Visibility设置成hidden。</li>
+<li>隐藏一些符号，有助于避免符号冲突</li>
+</ul>
+<h1 id="三种symbol-table">三种Symbol Table</h1>
+<p>在一个DSU的ELF文件中，可能同时存在三个关于Symbol的Section，它们分别是：</p>
+<ul>
+<li><strong>.symtab</strong>, 由之前所有的目标文件的.symtab通过一定规则合并而来，由于只会在编译和链接的时候会用到，可以称为 static symbol table</li>
+<li><strong>.dynsym</strong>，表示当前DSU向外提供的一部分API，内容由符号的可见效决定，在运行时动态加载会用到，称为 dynamic symbol table。</li>
+<li><strong>.dbg_info</strong>、<strong>.debug_line</strong>等储存了更多的信息用于debug，例如不仅储存了symbol对应的地址，还储存了代码行号等信息。可以统称为debug symbol table。</li>
+</ul>
+<p>其中static symbol table 和debug symbol table 不是必须的，没有这两者程序也可以运行，在链接完成后可以通过<code>strip</code>，命令去掉，但是.dynsym是必须的，链接器（如 <code>ld-linux.so</code>）依赖.dynsym查询出能够使用的符号。</p>
+<p>下面是<code>strip</code>的不同选项对于三种符号表的操作结果。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left"><strong>命令/选项</strong></th>
+<th style="text-align:left"><strong>.symtab</strong></th>
+<th style="text-align:left"><strong>.dynsym</strong></th>
+<th style="text-align:left"><strong>.debug_</strong>*</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>strip --strip-all</code>/ <code>strip -s</code></td>
+<td style="text-align:left">移除</td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">移除</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>strip --strip-debug</code>/ <code>strip -g</code>/ <code>strip -d</code></td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">移除</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>strip --strip-unneeded</code></td>
+<td style="text-align:left">部分移除<sup>*</sup></td>
+<td style="text-align:left">保留</td>
+<td style="text-align:left">保留</td>
+</tr>
+</tbody>
+</table>
+<h1 id="symbol-type">Symbol Type</h1>
+<h2 id="data-symbol">Data Symbol</h2>
+<p>Data Symbol指向 .data Section里面的内容，根据Binding可以分为Local和Global<br>
+以下面的代码为例：</p>
+<pre><code class="language-c++">int value = 42;
+static int s_value = 42;
+int unintializedValue;
+static int uninitializedStaticValue;
+namespace{
+    int valueInAnonymousNamespace = 42;
+}
+namespace named{
+    int valueInNamedNamespace = 42;
+}
+void someFunction(){
+    static int functionStaticValue = 300; // 这也是局部符号
+    int functionLocalValue = 300;
+}
+
+class MyClass
+{
+public:
+    static int classStaticValue;
+};
+int MyClass::classStaticValue = 400; // 如果没有外部引用，通常是局部的
+
+auto lambda = [](){
+    static int lambdaStaticValue = 500;
+    return lambdaStaticValue;
+};
+
+</code></pre>
+<p>我们在Ubuntu22上面使用<code>g++ -c values.cc -o values.o</code>生成目标文件，然后使用<code>nm values.o</code>,可以得到如下结果：</p>
+<pre><code class="language-shell">#nm values.o 
+0000000000000000 T _Z12someFunctionv
+0000000000000008 b _ZL24uninitializedStaticValue
+0000000000000004 d _ZL7s_value
+0000000000000008 d _ZN12_GLOBAL__N_125valueInAnonymousNamespaceE
+000000000000000c D _ZN5named21valueInNamedNamespaceE
+0000000000000014 D _ZN7MyClass16classStaticValueE
+0000000000000010 d _ZZ12someFunctionvE19functionStaticValue
+0000000000000004 B lambda
+0000000000000000 B unintializedValue
+0000000000000000 D value
+</code></pre>
+<p>最右侧是经过mangle后的符号名称，但是我们仍然可以根据特征将之与变量名称对应，中间的字母表示符号的类型，D和d表示符号指向 .data section。其中D表示当前符号是全局的，可以在当前TU之外的地方访问。d表示仅仅能够在当前TU中被访问，可以发现以下的操作会将符号改变符号的Binding为Local。</p>
+<ul>
+<li>使用<code>static</code>关键字修饰全局变量，例如<code>s_value</code></li>
+<li>使用<code>static</code>关键字修饰函数局部变量，例如<code>functionStaticValue</code>和</li>
+<li>匿名空间里面的变量，比如<code>valueInAnonymousNamespace</code></li>
+</ul>
+<p>我们发现以下情况变量的Binding是Global。</p>
+<ul>
+<li>使用<code>static</code>关键字修饰类成员，例如<code>classStaticValue</code>符号是D，这个是符合之前常识的，和之前的语法相对应，其他地方可以通过<code>MyClass::classStaticValue</code>来访问。</li>
+<li>有名称的命名空间中的变量，例如<code>valueInNamedNamespace</code>。这个也是符合之前认知的，其他地方可以通过<code>named::valueInNamedNamespace</code>来访问。</li>
+<li>全局变量，例如<code>value</code></li>
+</ul>
+<p>但是注意并不是所有的变量都会有符号，比如函数中的局部变量，因为：</p>
+<ul>
+<li>局部变量存储在栈上，而不是全局数据段</li>
+<li>局部变量的生命周期仅限于函数执行期间</li>
+</ul>
+<h2 id="text-symbol">Text Symbol</h2>
+<p>Text Symbol指向函数，例如全局函数，以及类的成员函数。以下面的代码为例：</p>
+<pre><code class="language-c++">void GlobalFunction(){
+    return;
+}
+static void StaticFunction(){
+    return;
+}
+
+class SomeClass
+{
+public:
+    void MemberFunction();
+    static void StaticFunction();
+};
+
+void SomeClass::MemberFunction(){
+    return;
+}
+void SomeClass::StaticFunction(){
+    return;
+}
+namespace {
+    void AnonymousFunction(){
+        return;
+    }
+}
+void Use(){
+    StaticFunction();
+    AnonymousFunction();
+}
+</code></pre>
+<p>经过<code>gcc</code>编译后，使用<code>nm -C</code>查看，可以得到如下的符号表，其中<code>T</code>表示Binding为Global，<code>t</code>表示Binding为Local：</p>
+<pre><code class="language-c++">0000000000000000 T GlobalFunction()
+0000000000000018 T Use()
+0000000000000030 t StaticFunction()
+0000000000000034 t (anonymous namespace)::AnonymousFunction()
+0000000000000004 T SomeClass::MemberFunction()
+0000000000000014 T SomeClass::StaticFunction()
+0000000000000000 t ltmp0
+0000000000000038 s ltmp1
+</code></pre>
+<p>有以下的发现：</p>
+<ul>
+<li>
+<p>匿名空间或者<code>static</code>修饰的函数，Binding 为Local。</p>
+</li>
+<li>
+<p>类的成员函数是Global Text Symbol，这是因为从本质上来说类只是被包装起来的一个假象，类的成员函数会被编译器改写为普通函数，并隐式添加一个 <code>this</code> 指针参数。例如：</p>
+<pre><code class="language-c++">class SomeClass {
+public:
+    void MemberFunction(int x);
+};
+</code></pre>
+<p>编译后，<code>MemberFunction</code> 会被处理为类似：</p>
+<pre><code class="language-c++">void SomeClass_MemberFunction(SomeClass* this, int x); // 伪代码表示
+</code></pre>
+<p><code>this</code> 作为第一个参数传递。当调用类的成员函数的时候，第一个参数实际上是类实例的指针。在python中显示地体现了这个逻辑，每一个类成员函数第一个参数都是<code>self</code>。因此，类的成员函数调用本质上是普通函数调用，两者都对应Text Symbol。</p>
+</li>
+<li>
+<p>类的静态成员函数是Global Text Symbol，那是因为本质上它和全局函数类似，相比于类的普通函数还少了实例指针，这也解释了为什么类的静态函数里面无法访问非静态成员，因为它没有对应的实例指针，但是非静态函数却可以访问静态成员和调用静态函数，因为这些操作不需要实例指针。</p>
+</li>
+</ul>
+<h2 id="weak-symbol">Weak Symbol</h2>
+<p>当有相同的Text Symbol或者Data Symbol 重命的时候，我们会收到multiple definition的变异报错，但是对于定义在头文件的一个类或者模板函数，我们多处include，却不会报错，这是为什么呢？ 这与Weak Symbol相关。</p>
+<p>编译器对于Weak Symbol采取如下规则：</p>
+<ul>
+<li>允许出现多个相同的Weak Symbol，在链接的时候会合并所有重复的弱符号，仅保留一个定义，避免冲突；</li>
+<li>若存在同名的强符号和弱符号，链接器优先选择强符号；</li>
+</ul>
+<pre><code class="language-c++">
+__attribute__((weak)) void WeakFunction() {
+    return;
+}
+struct SomeClass {
+     int ImplicitInlineFunc() { return 2; }
+     int NotInlineFunc();
+};
+
+int SomeClass::NotInlineFunc() {
+    return 3;
+}
+
+template&lt;typename T&gt; T GetValue() { return 1; }
+
+template&lt;&gt;
+double GetValue&lt;double&gt;() {
+    return 42; // 返回一个特殊值
+}
+int UseIt(){
+    SomeClass obj;
+    return obj.InexplicitInlineFunc()+GetValue&lt;int&gt;();
+}
+</code></pre>
+<p>在编译后，我们使用<code>nm -c [target]</code>命令查看，得到以下的内容。</p>
+<pre><code class="language-shell">0000000000000000 W WeakFunction()
+000000000000003b T UseIt()
+000000000000001f T double GetValue&lt;double&gt;()
+0000000000000000 W int GetValue&lt;int&gt;()
+000000000000000c T SomeClass::NotInlineFunc()
+0000000000000000 W SomeClass::ImplicitInlineFunc()
+                 U __stack_chk_fail
+</code></pre>
+<p>我们可以得到以下结论：</p>
+<ul>
+<li>类的内联函数是Weak Symbol，比如<code>SomeClass::ImplicitInlineFunc()</code>，但是非内联函数不是Weak Symbol，而和普通函数一样是Text Symbol 比如<code>SomeClass::NotInlineFunc()</code>。</li>
+<li>Template Method是Weak Symbol，但是完全特化的Template Method和普通函数一样是Text Symbol，比如<code>double GetValue&lt;double&gt;()</code>。所以完全特化的Template Method的声明可以写在头文件里面，但是实现必须写在源文件里面，和普通函数一样。</li>
+<li>我们可以使用<code>__attribute__((weak))</code>显示将一个函数声明为Weak Symbol。</li>
+</ul>
+<p>将一个函数显示声明为Weak Symbol有一个妙用，就是允许用户重写特定的函数，假设我们有如下API。</p>
+<pre><code>__attribute__((weak)) struct Resource* loadResource() {/*load from file*/}
+</code></pre>
+<p>这个API 默认是从文件中加载资源，但是如果用户希望能够从其他地方加载资源，就可以根据自己的需求重写<code>loadResource()</code>,定义一个强符号Text Symbol对其进行覆盖。用户可能会采取如下的实现之一；</p>
+<pre><code>struct Resource* loadResource() {/*load from database*/}
+struct Resource* loadResource() {/*load from network*/}
+struct Resource* loadResource() {/*load from memory*/}
+</code></pre>
+<h2 id="unique-symbol">Unique Symbol</h2>
+<p>在C++ 17中扩展了inline 关键字的使用范围，比如可以用来修饰全局变量，和类的静态成员，从而允许可以将上述两者的声明和实现都放在头文件中。</p>
+<pre><code class="language-c++">inline int GlobalValue = 1; 
+struct SomeClass { 
+     static int inline InlineStaicMethod() { return InlineStaticField; } 
+     static inline int InlineStaticField = 2; 
+     static int StaticField;
+};
+
+int SomeClass::StaticField = 4; // static member initialization
+
+int main() { 
+    return GlobalValue + SomeClass::InlineSttaicMethod(); 
+}
+</code></pre>
+<p>上面的代码使用<code>g++</code>编译后，可以使用<code>nm -C</code>命令查看，可以得到下面的符号表，其中Uniqe Symbol用作小写的 <strong>u</strong>表示。</p>
+<pre><code class="language-shell">0000000000000000 u GlobalValue
+0000000000000000 D SomeClass::StaticField
+0000000000000000 u SomeClass::InlineStaticField
+0000000000000000 W SomeClass::InlineStaicMethod()
+0000000000000000 T main
+</code></pre>
+<p>经过观察可以得到如下有趣的规则：</p>
+<ul>
+<li>可以发现使用<code>inline</code>修饰的全局变量类的静态成员变量都是Unique Symbol。</li>
+<li>但是对于Static Class Method，会默认内联，这时候即使再显示使用<code>inline</code>修饰，仍然是Weak Symbol。</li>
+<li>对于没有Static Class Field，如果没有用inline修饰就是Data Symbol，如果使用了<code>inline</code>修饰就是Unique Symbol，虽然两者从作用上来说都差不多，只是后者方便了一点儿。</li>
+</ul>
+<p>值得注意的是Unique Symbol是 GCC使用的方法，Clang不使用这个方法，所以使用<code>clang</code>编译，得到的符号表如下。</p>
+<pre><code class="language-shell">0000000000000000 V GlobalValue
+0000000000000000 D SomeClass::StaticField
+0000000000000000 V SomeClass::InlineStaticField
+0000000000000000 W SomeClass::InlineSttaicMethod()
+0000000000000000 T main
+</code></pre>
+<p><code>V</code>表示弱对象符号，类似于GCC的<code>W</code>。</p>
+<h2 id="undefined-symbol">Undefined Symbol</h2>
+<p>C++采用分离编译模型，每个翻译单元（TU）独立编译。如果 TU A 引用了 TU B 中的函数或变量，TU A 的编译阶段只需这些符号的声明，编译器会将其标记为Undefined Symbol并记录在目标文件中。链接阶段，链接器在所有目标文件中查找这些符号的定义。若找不到，则报未定义符号错误。</p>
+<pre><code class="language-c++">extern int ExternalValue; // 这是一个外部符号
+int UninitializedValue; // 这是一个未初始化的全局变量
+void FunctionDeclaration();
+extern void ExternFunctionDeclaration();
+int main()
+{
+    ExternalValue = 100;
+    FunctionDeclaration();
+    ExternFunctionDeclaration();
+    return 0;
+}
+</code></pre>
+<p>使用<code>g++</code>编译后，使用<code>nm -C</code>命令查看，可以得到如下的符号表：</p>
+<pre><code class="language-shell">                 U ExternalValue
+0000000000000000 B UninitializedValue
+                 U FunctionDeclaration()
+                 U ExternFunctionDeclaration()
+0000000000000000 T main
+</code></pre>
+<p>Undefined Symbol使用大写的<strong>U</strong>，Unique Symbol使用小写的<strong>u</strong>。可以得到以下结论：</p>
+<ul>
+<li>对于函数声明，如果没有实现，无论是否使用``extern`修饰都是Undefined Symbol。</li>
+<li>对于全局变量声明，如果使用<code>extern</code>修饰会是Undefined Symbol，如果不使用会是BSS Symbol。</li>
+</ul>
+<p>在C++中如果多次声明一个函数不会报错，但是多次声明一个变量却会报错：</p>
+<pre><code class="language-c++">int UninitializedValue; 
+int UninitializedValue; // 报错redefinition错误
+void FunctionDeclaration();
+void FunctionDeclaration();
+extern void FunctionDeclaration();//不报错，只会产生一个Undefined Symbol
+</code></pre>
+<p>所以理论上只要函数签名保持一致，函数声明加不加<code>extern</code>关键字无所谓。</p>
+<h1 id="总结">总结</h1>
+<p>这次较为系统地学习了Symbol相关的内容，这次学习后可以有以下好处：</p>
+<ul>
+<li>能够更好地处理编译时的各种报错，比如对于redefinition以及undefined symbol错误有更深的理解。</li>
+<li>对于C++的语法有更深的理解。
+<ul>
+<li>比如<code>static</code>关键字的几种用法，最开始似懂非懂，只知道需要背下来，后来用得多了，自然会，这次进一步学习了里面的底层原理。之前遇到的各种语法规则现在都找到了合理的解释。</li>
+<li>还有对于类的成员函数的理解，之前遇到过一个问题，一个类的成员函数签名看起来和一个全局函数签名一样，但是就是无法绑定，原因是前者有一个隐藏的实例指针参数。这次有了更加深刻的理解。</li>
+<li>再比如之前遇到过一个问题，为什么模板函数的实现可以写在头文件，但是完全特化的模板函数的实现就必须写在源文件，这次也有了更深层次的理解。</li>
+</ul>
+</li>
+</ul>
+<p>对于整个编译过程其实更多可以学习的，比如链接时的relocation，之后看需要可以继续学习，最后将<a href="https://github.com/WatsonShum/elf_symbols_learn">本文的相关代码</a>整理到了一个仓库中方便之后的学习。</p>
+<h1 id="参考">参考</h1>
+<ul>
+<li><a href="https://www.youtube.com/watch?v=X2jFjeCDOYw&amp;t=1326s">How Linux Elf Symbols Work and How They Are Used in C++ and C Programming - Anders Schau Knatten</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Nm_(Unix)">WikiPedia nm (Unix)</a></li>
+<li><a href="https://stackoverflow.com/questions/79157458/what-is-the-difference-of-weak-and-unique-symbol-binding">StackOverflow：What is the difference of weak and unique symbol binding?</a></li>
+</ul>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E8%B5%B7%E5%9B%A0">起因</a></li>
+<li><a href="#separate-compilation-model">Separate Compilation Model</a>
+<ul>
+<li><a href="#%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5">基本概念</a></li>
+<li><a href="#elf-format">ELF Format</a></li>
+<li><a href="#%E7%9B%B8%E5%85%B3%E5%B7%A5%E5%85%B7">相关工具</a></li>
+<li><a href="#%E4%B8%BA%E4%BB%80%E4%B9%88%E9%9C%80%E8%A6%81symbol">为什么需要Symbol</a></li>
+</ul>
+</li>
+<li><a href="#binding-vs-visibility">Binding vs Visibility</a></li>
+<li><a href="#%E4%B8%89%E7%A7%8Dsymbol-table">三种Symbol Table</a></li>
+<li><a href="#symbol-type">Symbol Type</a>
+<ul>
+<li><a href="#data-symbol">Data Symbol</a></li>
+<li><a href="#text-symbol">Text Symbol</a></li>
+<li><a href="#weak-symbol">Weak Symbol</a></li>
+<li><a href="#unique-symbol">Unique Symbol</a></li>
+<li><a href="#undefined-symbol">Undefined Symbol</a></li>
+</ul>
+</li>
+<li><a href="#%E6%80%BB%E7%BB%93">总结</a></li>
+<li><a href="#%E5%8F%82%E8%80%83">参考</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/bai-du-apollo-kai-yuan-xiang-mu-record-mo-kuai-yuan-ma-yue-du/">
+              <h3 class="post-title">
+                百度 Apollo 开源项目 Record 模块源码阅读
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

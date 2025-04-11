@@ -1,0 +1,378 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cpp 实现一个插件系统 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="Cpp 实现一个插件系统 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="之前自己写过许多插件，比如 SolidWorks 和 Matlab 的插件，这次自己实现一个插件系统，自己经过一番尝试，也算是做了一个有模有样的东西，虽然离成熟的商业产品还有距离，但是已经能满足需求了。因此也用一篇文章记录一下。
+背景
+假设..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              Cpp 实现一个插件系统
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-08-12
+              </span>
+              <span>
+                9 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/cpp-shi-xian-yi-ge-cha-jian-xi-tong.jpg" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>之前自己写过许多插件，比如 SolidWorks 和 Matlab 的插件，这次自己实现一个插件系统，自己经过一番尝试，也算是做了一个有模有样的东西，虽然离成熟的商业产品还有距离，但是已经能满足需求了。因此也用一篇文章记录一下。</p>
+<h1 id="背景">背景</h1>
+<p>假设有一个在Linux上本地运行的软件，服务许多用户，之前的工作流程是用户提出需求，和开发人员定好相关参数，经过排期，实现功能后，编译打包软件交给用户，以上整个的工作链条比较长。<br>
+再假设由于有多个业务方向的团队使用该软件，并且每个团队所需的功能不同但是都很相近，比如团队A需要功能1、2、3、4，而团队B需要功能5、6、7、8。因此，软件打包了两个不同的版本。给团队A给的是版本A，给团队B给的是版本B，对于这两个版本的区分不是很清楚，在代码中很多是通过 <code>if-else</code> 来实现的。<br>
+另一方面用户有时候一些简单的功能需求，希望能够快速得得到验证，但是由于排期比较紧张，所以用户需要等待开发人员实现后才能验证他们的想法。<br>
+为了解决以上的问题，希望这个软件支持插件系统，实现如下的目标：</p>
+<ul>
+<li>缩短实现功能的流程，用户可以自己创建插件，而不需要给开发团队提需求，可以快速验证他们的想法。</li>
+<li>实现代码的解耦，不再需要编译不同的软件版本，而只是需要一个软件本体，加上相应的插件就可以满足需求，理想情况下，对于团队A，只需要提供软件本体和功能1、2、3、4的插件就可以了。每次新增一个功能也不需要重新编译软件本体，只需要新开发一个插件。</li>
+</ul>
+<p>基于以上的目标，我设计并实现了如下的插件系统：</p>
+<ul>
+<li>用户使用我提供的基础类和API，创建自己的插件，并编译成.so文件，这些插件单独存放在专门的插件仓库中。</li>
+<li>本体软件动态加载这些.so文件，实现动态加载功能，本体软件存放在另外一个仓库。</li>
+</ul>
+<h1 id="实现原理">实现原理</h1>
+<p>由于用户的插件是单独编译成一个.so 文件，我们需要使用 <code>dlopen</code> 和 <code>dlsym</code> 来加载 .so 中的符号，<code>dlopen</code> 和 <code>dlsym</code> 是 POSIX 操作系统提供的函数，在 Windows 上也有对应的函数。</p>
+<p><code>dlopen</code> 返回是解析后的 .so 文件的句柄，输入参数为 .so 文件地址和 解析模式。</p>
+<pre><code class="language-cpp">void* handle = dlopen(&quot;./plugin.so&quot;, RTLD_LAZY);
+</code></pre>
+<p><code>dlsym</code> 返回的是解析后的函数对象，输入参数是 .so文件的句柄以及所解析函数的名称。</p>
+<pre><code class="language-cpp"> plugin_function func = (plugin_function) dlsym(handle, &quot;plugin_function&quot;);
+</code></pre>
+<p>.so 文件中的符号名称是编译器根据 函数名称动态生成的：</p>
+<ul>
+<li>对于这样 <code>extern &quot;C&quot; void plugin_function()</code> 使用 <code>extern &quot;C&quot;</code> 修饰的函数，编译后在.so 的符号名称和函数名称一致。</li>
+<li>对于类的成员函数，涉及到 Name Mangling，C++编译器会对类的成员函数进行名称修饰，以确保每个符号在链接时都是唯一的。这是因为C++支持函数重载（即同名函数可以有不同的参数列表），所以需要一种机制来唯一标识每个函数。所以经常编译后可以看到一些类似乱码，但是又有规律可辨的符号，比如下面这样：<pre><code class="language-cpp">00000000000006b5 T _ZN7Example15member_functionEi
+</code></pre>
+</li>
+</ul>
+<p>为了能够在使用 <code>dlsym</code>时能够准确找到该函数的符号，所以该函数需要被标记成为 <code>extern &quot;C&quot;</code>。<br>
+了解了以上这些知识，就可以来设计插件系统了。</p>
+<h1 id="代码实现">代码实现</h1>
+<h2 id="pluginbase"><code>PluginBase</code></h2>
+<pre><code class="language-cpp">#include &lt;string&gt;
+class PluginManager//前置声明
+// 基类插件
+class PluginBase {
+ public:
+  virtual ~PluginBase() = default;
+
+  // 纯虚函数，派生插件应实现该函数
+  virtual std::string GetName() const = 0;
+  virtual void Run() = 0;
+
+  std::shared_ptr&lt;PluginManager&gt; plugin_manager;//用来获取的 API
+};
+
+// 宏，用于定义导出C接口的创建插件实例函数
+#define CREATE_PLUGIN(PluginClass) \
+extern &quot;C&quot; PluginBase* CreatePlugin() { \
+  return new PluginClass(); \
+}
+
+#endif  // PLUGIN_BASE_H_
+</code></pre>
+<p>在 PluginBase 的头文件中，定义了 <code>CREATE_PLUGIN(PluginClass)</code>这样一个宏，用来快速地生成插件实例。</p>
+<h2 id="plugin-manger">Plugin Manger</h2>
+<p>为了管理这些插件，我们创建一个 <code>PluginManager 类</code>，这个类的主要工作是：</p>
+<ul>
+<li>负责加载和管理插件，所以它依赖于 <code>PluginBase</code> 这个类，加载插件的函数是 <code>LoadPlugin</code>，加载后的插件放在 <code>vector</code> 这样一个数据结构中。 通过 <code>ShutDown</code> 函数卸载所有插件。</li>
+<li>给插件提供 API，比如在下面的例子中，就给 Plugin 提供了 <code>APIMethod1()</code>、<code>APIMethod2()</code>、<code>APIMethod3()</code>等 API。</li>
+</ul>
+<pre><code class="language-cpp">#include &quot;plugin_base.h&quot;
+// 单例模式插件管理器
+class PluginManager {
+ public:
+  static std::shared_ptr&lt;PluginManager&gt; Instance() {
+    static auto instance=make_shared&lt;PluginManager&gt;();
+    return instance;
+  }
+
+  bool LoadPlugin(const std::string&amp; plugin_path) {
+    void* handle = dlopen(plugin_path.c_str(), RTLD_LAZY);
+    if (!handle) {
+      std::cerr &lt;&lt; &quot;Cannot open library: &quot; &lt;&lt; dlerror() &lt;&lt; '\n';
+      return false;
+    }
+
+    // 清除现有错误
+    dlerror();
+
+    // 加载符号
+    using CreatePluginFunc = PluginBase* (*)();
+    CreatePluginFunc create_plugin = (CreatePluginFunc) dlsym(handle, &quot;CreatePlugin&quot;);
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+      std::cerr &lt;&lt; &quot;Cannot load symbol 'CreatePlugin': &quot; &lt;&lt; dlsym_error &lt;&lt; '\n';
+      dlclose(handle);
+      return false;
+    }
+
+    // 创建插件实例并存储
+    std::shared_ptr&lt;PluginBase&gt; plugin(create_plugin());
+    plugins_.push_back(plugin);
+    handles_.push_back(handle);
+    return true;
+  }
+  void Run(){
+      for(auto plugin: plugins_){
+          plugin-&gt;Run();
+      }
+  }
+
+  void APIMethod1() {
+    // 实现API方法1
+  }
+
+  void APIMethod2() {
+    // 实现API方法2
+  }
+
+  void APIMethod3() {
+    // 实现API方法3
+  }
+  
+  void ShutDown() {
+    for (void* handle : handles_) {
+      dlclose(handle);
+    }
+    plugins_.clear();
+    handles_.clear();
+  }
+
+ private:
+  PluginManager() = default;
+  ~PluginManager() {
+    ShutDown();
+  }
+  PluginManager(const PluginManager&amp;) = delete;
+  PluginManager&amp; operator=(const PluginManager&amp;) = delete;
+
+  std::vector&lt;std::shared_ptr&lt;PluginBase&gt;&gt; plugins_;
+  std::vector&lt;void*&gt; handles_;
+};
+</code></pre>
+<h2 id="exmapleplugin">ExmaplePlugin</h2>
+<p>为了让用户明白如何使用这个 Plugin系统，提供一个例子是必须的。</p>
+<pre><code class="language-cpp">#include &lt;iostream&gt;
+#include &quot;plugin_manager.h&quot;
+// 示例插件
+class ExamplePlugin : public PluginBase {
+ public:
+  std::string GetName() const override {
+    return &quot;ExamplePlugin&quot;;
+  }
+  void Run(){
+      plugin_manager-&gt;APIMethod1();
+      plugin_manager-&gt;APIMethod2();// 调用API 做一些事情
+  }
+};
+
+// 使用宏定义创建插件实例函数
+CREATE_PLUGIN(ExamplePlugin)
+</code></pre>
+<p>这个插件引用了 <code>PluginManager</code> 的头文件用来调用其提供的 API 以及获取 <code>PluginBase</code> 对象，这个 Plugin会单独编译成.so，所以 <code>PluginManager</code> 这个单例会失效，相当于每一个 Plugin 都会有一个自己的单例。这样是不符合设计目标的，为了解决问题，需要在每个插件加载后，加上这样一个语句。</p>
+<pre><code class="language-cpp">std::shared_ptr&lt;PluginBase&gt; plugin(create_plugin());
+plugin-&gt;plugin_manager=this-&gt;Instance(); //强制把插件中的单例设置成本体软件中的单例
+plugins_.push_back(plugin);
+</code></pre>
+<p>这个插件最终需要单独编译，编译的设置根据不同的编译工具而异，使用 Bazel、Cmake 都可以。</p>
+<h1 id="最终使用">最终使用</h1>
+<pre><code class="language-cpp">#include &quot;PluginManager.h&quot;
+#include &lt;iostream&gt;
+
+int main() {
+  auto plugin_manager = PluginManager::Instance();
+
+  // 替换为你的插件实际路径
+  if (plugin_manager-&gt;LoadPlugin(&quot;./libexample.so&quot;)) {
+    std::cout &lt;&lt; &quot;Plugin loaded successfully.\n&quot;;
+  } else {
+    std::cerr &lt;&lt; &quot;Failed to load plugin.\n&quot;;
+  }
+  plugin_manager-&gt;Run()
+  // 卸载插件
+  plugin_manager-&gt;ShutDown();
+
+  return 0;
+}
+</code></pre>
+<p>实际工程中，肯定不止一个插件，用户可以将所有编译好的插件放在一个目录下面，然后加载，所以给 <code>PluginManager</code> 新增这样一个函数：</p>
+<pre><code class="language-cpp"> bool LoadPluginsFromDirectory(const std::string&amp; directory_path) {
+    for (const auto&amp; entry : std::filesystem::directory_iterator(directory_path)) {
+      if (entry.path().extension() == &quot;.so&quot;) {
+        if (!LoadPlugin(entry.path().string())) {
+          std::cerr &lt;&lt; &quot;Failed to load plugin: &quot; &lt;&lt; entry.path() &lt;&lt; '\n';
+        }
+      }
+    }
+    return true;
+  }
+</code></pre>
+<h1 id="总结">总结</h1>
+<p>本文设计并实现了一个插件系统，当然这个也不是什么前沿技术，不过还是涉及到了许多的知识点，可以让自己变得不只是一个 <code>if-else</code>工程师，说起插件系统，百度开源的 CyberRT 框架也是插件化的设计，每个算法模块都会继承一个基类，然后编译成一个.so 文件被动态加载，其原理和我实现的这个插件系统是几乎一样的，只是对于一些类的封装不同，对这块感兴趣的读者也可以去看一下相关源码。<br>
+目前一个可以改进的地方就是对于多个单例的处理，希望能够改变编译关系，从根本上解决这个问题。</p>
+<p>除了这个插件系统本身，还有许多其他的额外工作需要做，比如插件系统的选择性编译，以及对于 API 的封装，这些工作就不在本文的框架下继续记录了。</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E8%83%8C%E6%99%AF">背景</a></li>
+<li><a href="#%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86">实现原理</a></li>
+<li><a href="#%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0">代码实现</a>
+<ul>
+<li><a href="#pluginbase"><code>PluginBase</code></a></li>
+<li><a href="#plugin-manger">Plugin Manger</a></li>
+<li><a href="#exmapleplugin">ExmaplePlugin</a></li>
+</ul>
+</li>
+<li><a href="#%E6%9C%80%E7%BB%88%E4%BD%BF%E7%94%A8">最终使用</a></li>
+<li><a href="#%E6%80%BB%E7%BB%93">总结</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-jian-dan-de-shi-jian-xi-tong/">
+              <h3 class="post-title">
+                Cpp实现一个简单的事件系统
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

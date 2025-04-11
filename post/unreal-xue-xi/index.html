@@ -1,0 +1,237 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unreal5.0学习 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="Unreal5.0学习 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="背景
+自己对于计算机图形学一直比较感兴趣，已经有过相关的经历，之前使用 Unigine 这样一款三维引擎做过开发，工作后也积累了 OpenGL 经验。但是对于主流的 Game Engine 还没有上手经验，于是就在 Youtube上找了一个..." />
+    <meta name="keywords" content="学习" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              Unreal5.0学习
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-10-04
+              </span>
+              <span>
+                4 min read
+              </span>
+              
+                <a href="https://WatsonShum.github.io/tag/BvSf8mR6m/" class="post-tag">
+                  # 学习
+                </a>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/unreal-xue-xi.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h1 id="背景">背景</h1>
+<p>自己对于计算机图形学一直比较感兴趣，已经有过相关的经历，之前使用 Unigine 这样一款三维引擎做过开发，工作后也积累了 OpenGL 经验。但是对于主流的 Game Engine 还没有上手经验，于是就在 Youtube上找了一个<a href="https://www.youtube.com/watch?v=k-zMkzmduqI&amp;t=3785s">学习视频</a>开始学习。此篇Post 是对学习过程的简单记录。</p>
+<h1 id="操作和窗口">操作和窗口</h1>
+<p>自己之前接触过 SolidWorks 等三维软件，Unreal 的操作和窗口布局和之前接触过三维软件差不多，所以就不详细记录了。</p>
+<h1 id="material-graph">Material Graph</h1>
+<p>Materia l是计算机图形学中十分重要的一个概念，应用广泛，除了可以储存颜色之外，还可以当作 Mask 以及当作 normal map。<br>
+Unreal 的纹理是基于 PBR 的，包括基础颜色，Metallic、Roughness等选项，可以通过Material Graph已可视化的方式来编辑。同时还有个类似与 Class-Instance 的系统，可以创建一个 Material 模板，然后生成相应的 Instance，模板中的 parameter 是可变的。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401081311.png" alt="" loading="lazy"></p>
+<h1 id="light-source">Light Source</h1>
+<p>有下面几种光源：</p>
+<ul>
+<li>Directional Light（Sun Light）</li>
+<li>Point Light</li>
+<li>Spot Light</li>
+<li>Reactangle Light<br>
+属性包括 temperature 和 Intensity 等，也是模拟真实世界，米家的智能家具灯泡就包括这几种可调的参数。</li>
+</ul>
+<h1 id="lumen">Lumen</h1>
+<p>是一种real time global illumination，使用方法：</p>
+<ul>
+<li>在 PostProcessVolumn 中设置全局光照-方法为 Lumen，设置反射-方法为 Lumen</li>
+<li>Light Source 需要设置为 Movable<br>
+之前的方法都不是实时的，需要进行 Bake，生成的是一张 Texture。可以做到的效果会好很多，但是每次修改参数都需要重新构建。</li>
+</ul>
+<h1 id="landscape">Landscape</h1>
+<p>Landscape模式用于创建地形，提供了多种笔刷，常用的有雕刻、平滑、平整等。可以通过纹理给地表添加颜色。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401094587.png" alt="" loading="lazy"></p>
+<h1 id="quixel-bridge">Quixel Bridge</h1>
+<p>Quixel Bridge 是一个在线的免费的 digital asset 资料库，有 3D 模型以及 Surface 等内容。导入的方法也十分简单，直接拖拽就可以了，会自动在 Content Drawer 里面创建一个 Megascans 的文件夹。</p>
+<h1 id="foliage-mode">Foliage Mode</h1>
+<p>Foliage 模式用于绘制地表植物，<br>
+可以从从 Quixel 里面导入植物，然后有一些材质 Parameter 可以使用，比如 Color Variation, Wind等。打开具体的 static mesh 可以看到 LOD，LOD0 是最近的，LOD4 完全就是一张图片了，也就是billboard。<br>
+编辑植物和编辑 Landscape 差不多，都是通过笔刷。 在 Foliage 中也可以使用 Select 功能，控制每一株植物的位置。<br>
+<img src="https://WatsonShum.github.io/post-images/1696401102598.png" alt="" loading="lazy"></p>
+<h1 id="nanite">Nanite</h1>
+<p>一种很厉害的技术，能够自动实现 LOD 而不丢失细节，同时性能还有保证。启用方法十分简单，直接在Content Drawe 里面右键物体选择 Enable Nanite 就可以了。可以直接从 Quixel 中下载 Nanite 格式的资产。</p>
+<h1 id="blueprint">BluePrint</h1>
+<p>BluePrin 是 Unrea l的 Visual Scripting Language，导入 Third-person shoot feature pack后，可以得到一个默认的 Character 和 BluePrint，可以在 World Setting 的 GameMode Override启用 BP_ThirdPersonGameMode。双击这个 Character 就以打开BluePrint的编辑界面，得到一个类似Material Graph 的 Event Grapgh。</p>
+<ul>
+<li>可以通过 PlayerStart 这个Object来指定Player出生的地点。</li>
+<li>还有一个可视化 Debug 的功能</li>
+<li>自己感觉 BluePrint 是基于 Publish-Subsrcibe的思路设计的，通过事件把整个流程串起来，用户也可以自己定义事件。</li>
+</ul>
+<h1 id="castle-environment">Castle Environment</h1>
+<p>在这个项目中会将之前用到的知识综合应用，创建出一个游戏场景。整体的制作顺序是Large-&gt;Medium-&gt;Detail：</p>
+<ul>
+<li>在 Large 的制作阶段，创建了 Lanscape，用笔刷刷出了一些地形，创建了湖泊，导入纹理当作远方背景。</li>
+<li>在 Medium 阶段，添加了 3D Mesh作为悬崖，这让场景看起来更加真实。</li>
+<li>之后添加了Unreal的自带商城里面导入了 megascan 的树木资产包，设置风速和季节等属性。</li>
+<li>之后添加了城堡，城堡是模块化设计，由许多组件组装而成。<br>
+下图是最终的效果：<br>
+<img src="https://WatsonShum.github.io/post-images/1696401112924.png" alt="" loading="lazy"></li>
+</ul>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#%E8%83%8C%E6%99%AF">背景</a></li>
+<li><a href="#%E6%93%8D%E4%BD%9C%E5%92%8C%E7%AA%97%E5%8F%A3">操作和窗口</a></li>
+<li><a href="#material-graph">Material Graph</a></li>
+<li><a href="#light-source">Light Source</a></li>
+<li><a href="#lumen">Lumen</a></li>
+<li><a href="#landscape">Landscape</a></li>
+<li><a href="#quixel-bridge">Quixel Bridge</a></li>
+<li><a href="#foliage-mode">Foliage Mode</a></li>
+<li><a href="#nanite">Nanite</a></li>
+<li><a href="#blueprint">BluePrint</a></li>
+<li><a href="#castle-environment">Castle Environment</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/cpp-shi-xian-yi-ge-cha-jian-xi-tong/">
+              <h3 class="post-title">
+                Cpp 实现一个插件系统
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

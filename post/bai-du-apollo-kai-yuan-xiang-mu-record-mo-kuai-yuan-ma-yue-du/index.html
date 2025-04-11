@@ -1,0 +1,811 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>百度 Apollo 开源项目 Record 模块源码阅读 | Watson&#39;s Blog</title>
+<link rel="shortcut icon" href="https://WatsonShum.github.io/favicon.ico?v=1744338721708">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://WatsonShum.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="百度 Apollo 开源项目 Record 模块源码阅读 | Watson&#39;s Blog - Atom Feed" href="https://WatsonShum.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="百度的 Apollo 项目在自动驾驶领域是一个知名的项目，自动驾驶涉及许多数据，例如传感器数据、算法数据等。Apollo 项目在存储这些数据的时候使用了自定义的 Record 格式，之前自己一直使用这个模块，但是对于深层次的原理没有一探究竟..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://WatsonShum.github.io">
+  <img class="avatar" src="https://WatsonShum.github.io/images/avatar.png?v=1744338721708" alt="">
+  </a>
+  <h1 class="site-title">
+    Watson&#39;s Blog
+  </h1>
+  <p class="site-description">
+    技术博客
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              百度 Apollo 开源项目 Record 模块源码阅读
+            </h2>
+            <div class="post-info">
+              <span>
+                2025-03-20
+              </span>
+              <span>
+                26 min read
+              </span>
+              
+            </div>
+            
+              <img class="post-feature-image" src="https://WatsonShum.github.io/post-images/bai-du-apollo-kai-yuan-xiang-mu-record-mo-kuai-yuan-ma-yue-du.png" alt="">
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>百度的 Apollo 项目在自动驾驶领域是一个知名的项目，自动驾驶涉及许多数据，例如传感器数据、算法数据等。Apollo 项目在存储这些数据的时候使用了自定义的 Record 格式，之前自己一直使用这个模块，但是对于深层次的原理没有一探究竟，最近有时间对其源码进行了阅读，写一些文字记录一下学习心得。<br>
+主要参考的源码：</p>
+<ul>
+<li><a href="https://github.com/ApolloAuto/apollo/tree/master/cyber/record">Record实现</a></li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/master/cyber/proto/record.proto">Proto定义</a></li>
+</ul>
+<h1 id="record格式的一些基本概念">Record格式的一些基本概念</h1>
+<ul>
+<li><code>chunk</code>：表示的是每次往文件系统里面写入的数据量，假如 <code>chunk_interval</code> 设置成 10M，那么内存中每累计 10M数据，就会往文件系统里面写入一次。</li>
+<li><code>segment</code>：自动分文件，如果将 <code>segment_interval</code> 设置成 1G，那么数据会每满 1G 就停止写入当前文件，创建一个新文件写入。</li>
+</ul>
+<h1 id="基本数据结构">基本数据结构</h1>
+<p>整个Record可以看作如下结构的不断重复。<code>[Section][数据块][Section][数据块]...[Section][数据块] </code>，实现了类似&quot;TLV&quot;(Type-Length-Value)的模式。</p>
+<p><code>section</code> 表示record格式里面不同的数据类别，</p>
+<ul>
+<li>type字段告诉解析器后续数据是什么类型，这决定了如何解释和处理这些数据。这实现了一种多态机制，允许单个文件包含不同类型的数据段，比如有<code>Header</code>、<code>Index</code>等。</li>
+<li>size字段提供了数据块的准确大小，使解析器能够：
+<ul>
+<li>精确知道需要读取多少字节</li>
+<li>在不需要处理某种类型数据时直接跳过</li>
+</ul>
+</li>
+</ul>
+<p>具体的定义如下。</p>
+<pre><code class="language-c++">  enum SectionType {
+    SECTION_HEADER = 0;
+    SECTION_CHUNK_HEADER = 1;
+    SECTION_CHUNK_BODY = 2;
+    SECTION_INDEX = 3;
+    SECTION_CHANNEL = 4;
+  };
+</code></pre>
+<pre><code class="language-c++">  struct Section {
+    proto::SectionType type;//具体section的Type，如上面的定义
+    int64_t size;//后面消息的大小
+  };
+</code></pre>
+<p>一点儿小问题：由于不同的编译器或者系统内存对齐的方式不一样，所以Section这个struct在不同条件下可能内存布局并不一样，理论上会产生兼容性问题。但是考虑到Apollo主要是在Linux平台运行，所以这个问题并没有暴露出来，进一步可以使用<code>#pragma pack</code>优化。</p>
+<p>Record数据顺序：开头是Header，中间Channel、Chunck Header和Chunk Body，最后是Index，Index和Header 是最后写入的，因为它们的数据很多对之前数据的统计，只能最后写入。有两点需要注意：</p>
+<ul>
+<li>Header虽然是最后写入，但是写入位置是放到最前面的，在这个过程中采取了一些小技巧，之后讨论。</li>
+<li>如果最后的Index写入过程出了问题，那么这个Record会暂时被标记为<code>incomplete</code>,但是索引是可以重建的，因为Index依赖的前面的数据都还存在。Apollo代码库提供了<a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recoverer.cc">recover</a>来完成上面的功能。<br>
+上面讨论了整体的数据结构，下面来讨论一下每种<code>SectionType</code>的具体数据结构。</li>
+</ul>
+<h2 id="header的定义">Header的定义</h2>
+<pre><code class="language-c++">message Header {
+  optional uint32 major_version = 1;
+  optional uint32 minor_version = 2;
+  optional CompressType compress = 3;
+  optional uint64 chunk_interval = 4;//一个chunk多大
+  optional uint64 segment_interval = 5;//一个segment多大
+  optional uint64 index_position = 6 [default = 0];
+  optional uint64 chunk_number = 7 [default = 0];//记录一个record里面有多少chubk
+  optional uint64 channel_number = 8 [default = 0];//记录一个record里面有多少channel
+  optional uint64 begin_time = 9 [default = 0];//整个record的开始时间
+  optional uint64 end_time = 10 [default = 0];//整个record的结束时间
+  optional uint64 message_number = 11 [default = 0];//一共有多少消息
+  optional uint64 size = 12 [default = 0];
+  optional bool is_complete = 13 [default = false];//是否完整，主要是判断后最后面有没有index
+  optional uint64 chunk_raw_size = 14;
+  optional uint64 segment_raw_size = 15;
+  optional MapInfo map_info = 16;
+  optional VehicleInfo vehicle_info = 17;
+}
+</code></pre>
+<p>Header记录了整个Record总体信息，比如开始时间，结束时间，消息总数，以及一些配置，例如<code>chunk_interval</code>和<code>segment_interval</code>。</p>
+<h2 id="chunk相关的定义">Chunk相关的定义</h2>
+<pre><code class="language-c++">message ChunkHeader {
+  optional uint64 begin_time = 1;//当前chunk的开始时间
+  optional uint64 end_time = 2;//当前chunk的结束时间
+  optional uint64 message_number = 3;//当前chunk的消息数量
+  optional uint64 raw_size = 4;//当前chunk的文件大小
+}
+
+message ChunkBody {
+  repeated SingleMessage messages = 1;//实际储存的消息
+}
+message SingleMessage {
+  optional string channel_name = 1;
+  optional uint64 time = 2;
+  optional bytes content = 3;
+}
+</code></pre>
+<p>ChunkHeader记录了当前Chunk的一些总体信息，例如开始时间，结束时间，以及消息数量。ChunkBody记录储存了具体信息，类似于一个消息数组。</p>
+<h2 id="index的定义">Index的定义</h2>
+<pre><code class="language-c++">message SingleIndex {
+  optional SectionType type = 1;//记录是什么数据的index
+  optional uint64 position = 2;//记录文件位置
+  oneof cache {//记录一些cache信息
+    ChannelCache channel_cache = 101;
+    ChunkHeaderCache chunk_header_cache = 102;
+    ChunkBodyCache chunk_body_cache = 103;
+  }
+}
+message Index {
+  repeated SingleIndex indexes = 1;
+}
+</code></pre>
+<p>Index储存了之前每个Section的索引信息，记录了文件位置，可以用来随机读取。</p>
+<h2 id="channel的定义">Channel的定义</h2>
+<pre><code class="language-c++">message Channel {
+  optional string name = 1;
+  optional string message_type = 2;
+  optional bytes proto_desc = 3;
+}
+</code></pre>
+<h1 id="支持多种message格式">支持多种Message格式</h1>
+<p>Record格式可以看作对于Protobuf格式的又一层封装，Protobuf格式一般是根据proto文件的定义来进行序列化和反序列化的，假如现在有一个<code>repeated message A</code>我现在想新加一种类型，那么我就只能修改原先的proto定义，加上<code>repeated message B</code>，也就是整个序列化和反序列化过程依赖一个proto消息的定义，必须一一对应，有一些缺点：</p>
+<ul>
+<li>不灵活，所有消息必须在用一个proto message中声明才能序列化和反序列化。</li>
+<li>没有办法支持任意类型消息的存储。<br>
+Record采取了以下方案。</li>
+</ul>
+<pre><code class="language-c++">message SingleMessage {
+  optional string channel_name = 1;
+  optional uint64 time = 2;
+  optional bytes content = 3;
+}
+</code></pre>
+<pre><code class="language-c++">template &lt;&gt;
+inline bool RecordWriter::WriteMessage(const std::string&amp; channel_name,
+                                       const std::string&amp; message,//string
+                                       const uint64_t time_nanosec,
+                                       const std::string&amp; proto_desc) {
+  proto::SingleMessage single_msg;
+  single_msg.set_channel_name(channel_name);
+  single_msg.set_content(message);
+  single_msg.set_time(time_nanosec);
+  return WriteMessage(single_msg);
+}
+</code></pre>
+<p>Record定义了<code>SingleMessage</code>,对所有消息进行封装。其中<code>content</code>字段表示实际的消息内容。也就是在写入消息的时候，首先都统一转化成string，这样有两个方向的好处：</p>
+<ul>
+<li>不必要再和某个message消息一一对应，支持多种来源，多个地方定义的proto消息的序列化和反序列化。</li>
+<li>可以支持其他格式的消息，比如json，只需要知道对应序列化和反序列化的方法就行。</li>
+</ul>
+<p>这样设计有一个trade-off就是增加序列化和反序列化的次数，原先只需要进行一次，现在<code>SingleMessage</code>和<code>content</code>都需要序列化和反序列化，增加了CPU的开销，但是相比与通用性和兼容性的提升，我觉得是值得的。</p>
+<h1 id="文件系统底层函数">文件系统底层函数</h1>
+<p>Record格式使用了如下的底层文件操作函数：</p>
+<ul>
+<li>
+<p><code>ssize_t read(int fd, void *buf, size_t count)</code><br>
+posix标准系统调用，用于从文件描述符读取数据<br>
+参数含义：</p>
+<ul>
+<li>fd_：文件描述符，指向已打开的记录文件</li>
+<li>buf：接收数据的缓冲区</li>
+<li>count：请求读取的字节数</li>
+</ul>
+<p>返回值 (count)：</p>
+<ul>
+<li>正值：实际读取的字节数</li>
+<li>0：表示已到达文件末尾(EOF)</li>
+<li>-1：读取失败，errno变量会包含错误原因</li>
+</ul>
+<p>关键特性：</p>
+<ul>
+<li>文件位置：每次成功读取后，文件位置指针自动向前移动读取的字节数</li>
+<li>可能读取不足：可能读取的字节数少于请求的字节数，这就是为什么需要检查返回值</li>
+<li>阻塞行为：默认情况下是阻塞调用，直到有数据可读或发生错误</li>
+</ul>
+</li>
+<li>
+<p><code>ssize_t write(int fd, const void *buf, size_t count)</code></p>
+<p>参数含义：</p>
+<ul>
+<li>fd_：文件描述符，指向要写入的目标文件</li>
+<li>buf：源数据缓冲区</li>
+<li>count：要写入的字节数</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>正值：实际成功写入的字节数</li>
+<li>-1：写入失败，errno变量会包含错误原因</li>
+</ul>
+<p>文件位置指针行为：</p>
+<ul>
+<li>与read类似，write也会从当前文件位置开始写入数据</li>
+<li>成功写入后，文件位置指针自动向前移动所写入的字节数<br>
+这使得连续的write调用可以顺序追加数据到文件中</li>
+</ul>
+</li>
+<li>
+<p><code>off_t pos = lseek(fd_, 0, SEEK_CUR);</code><br>
+纯查询操作，获取当前位置,Apollo据此封装了<code>CurrentPosition</code>函数：</p>
+<pre><code class="language-C++">int64_t RecordFileBase::CurrentPosition() {
+off_t pos = lseek(fd_, 0, SEEK_CUR);
+if (pos &lt; 0) {
+    AERROR &lt;&lt; &quot;lseek failed, file: &quot; &lt;&lt; path_ &lt;&lt; &quot;, fd: &quot; &lt;&lt; fd_
+        &lt;&lt; &quot;, offset: 0, whence: SEEK_CUR&quot;
+        &lt;&lt; &quot;, position: &quot; &lt;&lt; pos &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+}
+return pos;
+}
+</code></pre>
+</li>
+<li>
+<p><code>off_t pos = lseek(fd_, position, SEEK_SET);</code><br>
+将 fd_设置为从文件开头后 position 的位置。Apollo根据这个封装了<code>SetPosition()</code>函数。</p>
+<pre><code class="language-c++">bool RecordFileBase::SetPosition(int64_t position) {
+    off_t pos = lseek(fd_, position, SEEK_SET);
+    if (pos &lt; 0) {
+    AERROR &lt;&lt; &quot;lseek failed, file: &quot; &lt;&lt; path_ &lt;&lt; &quot;, fd: &quot; &lt;&lt; fd_
+            &lt;&lt; &quot;, offset: 0, whence: SEEK_SET&quot;
+            &lt;&lt; &quot;, position: &quot; &lt;&lt; pos &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+    return false;
+    }
+    return true;
+}
+</code></pre>
+</li>
+</ul>
+<p>由于以上的函数都是 posix 标准的函数，再加上C++的跨平台性，理论上支持 posix 标准的系统都可以支持 Record 格式，Apollo 官方是在 Linux 系统上使用 Record 格式，个人经过尝试确定在 MacOS系统上也可以正常工作。</p>
+<h1 id="record-的写入实现">Record 的写入实现</h1>
+<p>上文已经介绍了Record的数据结构和使用的底层函数，现在来讨论具体的写入实现，会发现十分简单易懂。下面这个函数是写入数据的核心函数。</p>
+<pre><code class="language-c++">template &lt;typename T&gt;
+bool RecordFileWriter::WriteSection(const T&amp; message) {
+  proto::SectionType type;
+  //根据模板类型，确定section的type，实际上写成一个type traits更好。
+  if (std::is_same&lt;T, proto::ChunkHeader&gt;::value) {
+    type = proto::SectionType::SECTION_CHUNK_HEADER;
+  } else if (std::is_same&lt;T, proto::ChunkBody&gt;::value) {
+    type = proto::SectionType::SECTION_CHUNK_BODY;
+  } else if (std::is_same&lt;T, proto::Channel&gt;::value) {
+    type = proto::SectionType::SECTION_CHANNEL;
+  } else if (std::is_same&lt;T, proto::Header&gt;::value) {
+    type = proto::SectionType::SECTION_HEADER;
+    if (!SetPosition(0)) {//将文件指针移动到文件开头，用于写Header
+      AERROR &lt;&lt; &quot;Jump to position #0 failed&quot;;
+      return false;
+    }
+  } else if (std::is_same&lt;T, proto::Index&gt;::value) {
+    type = proto::SectionType::SECTION_INDEX;
+  } else {
+    AERROR &lt;&lt; &quot;Do not support this template typename.&quot;;
+    return false;
+  }
+  Section section;
+  /// zero out whole struct even if padded
+  memset(&amp;section, 0, sizeof(section));
+  section = {type, static_cast&lt;int64_t&gt;(message.ByteSizeLong())};
+  //写入section
+  ssize_t count = write(fd_, &amp;section, sizeof(section));
+  if (count &lt; 0) {
+    AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_ &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+    return false;
+  }
+  if (count != sizeof(section)) {
+    AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_
+           &lt;&lt; &quot;, expect count: &quot; &lt;&lt; sizeof(section)
+           &lt;&lt; &quot;, actual count: &quot; &lt;&lt; count;
+    return false;
+  }
+  {
+    //使用RAII，写入具体的message
+    google::protobuf::io::FileOutputStream raw_output(fd_);
+    message.SerializeToZeroCopyStream(&amp;raw_output);
+  }
+  if (type == proto::SectionType::SECTION_HEADER) {//填充Header
+    static char blank[HEADER_LENGTH] = {'0'};
+    count = write(fd_, &amp;blank, HEADER_LENGTH - message.ByteSizeLong());
+    if (count &lt; 0) {
+      AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_ &lt;&lt; &quot;, errno: &quot; &lt;&lt; errno;
+      return false;
+    }
+    if (static_cast&lt;size_t&gt;(count) != HEADER_LENGTH - message.ByteSizeLong()) {
+      AERROR &lt;&lt; &quot;Write fd failed, fd: &quot; &lt;&lt; fd_
+             &lt;&lt; &quot;, expect count: &quot; &lt;&lt; sizeof(section)
+             &lt;&lt; &quot;, actual count: &quot; &lt;&lt; count;
+      return false;
+    }
+  }
+  header_.set_size(CurrentPosition());
+  return true;
+}
+</code></pre>
+<p>整个代码的逻辑就根据之前描述的一样，先写Section，然后后面写对于ProtoMessage，但是对于Header的写入做了特殊处理。由于Header里面的信息比如<code>end_time</code>直到最后才确定，但是又希望将它放到文件开头，采取的措施是在最开始的写入了一个空的Header作为占位符，等到需要写入Header的时候，使用<code>SetPosition(0)</code>将指针移动到开头，然后写入新的Header来覆盖之前的占位符。</p>
+<h1 id="chunk并行写入的实现">chunk并行写入的实现</h1>
+<p>上面我们了解了是如何完成写入的，但是将写入的过程放到当前线程并不是一个好的选择，因为往文件系统写文件会触发系统 IO，如果直接在当前线程写入，会影响当前线程的效率。导致当前线程 CPU 等待。从而影响当前线程其他地方代码的执行效率。这个问题主要是在写入Message的时候存在，因为Header和Index的写入都是一次性，而且都是在开头或者结尾，是系统初始化和关闭的时候，对于运行时的效率影响较小。但是Message是不断地写入的，所以需要优化，Apollo采取了以下的优化方法：</p>
+<ul>
+<li>单生产者和单消费者模式，使用一个专门的线程来负责将数据写入文件系统。其他线程将数据放到一个地方， 消费者线程来获取，一个线程专门负责写文件，从而避免了对其他线程的影响。</li>
+<li>使用了双缓冲模式，为了实现两个线程高效的数据通信，维护了两个 chunk，生产者线程不断地往第一个 chunk 里面写数据，当第一个 chunk 满足一定条件后，将两个 chunk 互相交换，并通知消费者线程来消费第二个 chunk，循环往复。</li>
+</ul>
+<pre><code class="language-c++">//写入线程
+bool RecordFileWriter::WriteMessage(const proto::SingleMessage&amp; message) {
+    //去掉部分无关代码
+    //将消息写入当前chubk
+  chunk_active_-&gt;add(message);
+  bool need_flush = false;
+  //判断是不是需要flush
+  if (header_.chunk_interval() &gt; 0 &amp;&amp;
+      message.time() - chunk_active_-&gt;header_.begin_time() &gt;
+          header_.chunk_interval()) {
+    need_flush = true;
+  }
+  if (!in_writing_ &amp;&amp; header_.chunk_raw_size() &gt; 0 &amp;&amp;
+      chunk_active_-&gt;header_.raw_size() &gt; header_.chunk_raw_size()) {
+    need_flush = true;
+  }
+  //如果不需要flush就返回
+  if (!need_flush) {
+    return true;
+  }
+  {
+    //进行flush操作
+    std::unique_lock&lt;std::mutex&gt; flush_lock(flush_mutex_);
+    chunk_flush_.swap(chunk_active_);
+    flush_cv_.notify_one();
+  }
+  return true;
+}
+//flush 线程
+void RecordFileWriter::Flush() {
+  while (is_writing_) {
+    std::unique_lock&lt;std::mutex&gt; flush_lock(flush_mutex_);
+    //在这儿等待
+    flush_cv_.wait(flush_lock,
+                   [this] { return !chunk_flush_-&gt;empty() || !is_writing_; });
+    if (!is_writing_) {
+      break;
+    }
+    if (chunk_flush_-&gt;empty()) {
+      continue;
+    }
+    in_writing_ = true;
+    //将数据写入文件系统
+    if (!WriteChunk(chunk_flush_-&gt;header_, *(chunk_flush_-&gt;body_.get()))) {
+      AERROR &lt;&lt; &quot;Write chunk fail.&quot;;
+    }
+    in_writing_ = false;
+    chunk_flush_-&gt;clear();
+  }
+}
+</code></pre>
+<p>关键点分析：</p>
+<ul>
+<li>使用了<code>flush_mutex_</code>来控制 flush 线程和数据交换。当<code>need_flush</code>为 true 的时候，写入线程会尝试获取<code>flush_lock(flush_mutex_)</code>。
+<ul>
+<li>如果这时候flush 线程单次flush还没有完成，会仍然持有锁，那么就会阻塞写入线程，直到完成。</li>
+<li>如果 flush完成了，那么会阻塞在<code>flush_cv_.wait(flush_lock,[this] { return !chunk_flush_-&gt;empty() || !is_writing_; });</code>。flush_cv_在 <code>wait()</code>的时候会短暂释放锁，那么写入线程就能获取锁，完成 swap 操作。之后通过 <code>notify_one</code>唤起 flush 线程继续工作。在要交换数据的时候，两个线程只能有一个工作，但是由于 swap 是一个耗时很短的操作，所以对整体影响不大，在其他时间里面，写入线程和 flush 线程都可以同时工作，提高了效率。</li>
+</ul>
+</li>
+<li>对于写入线程有两个条件可以判断是否需要 flush，分别是累积时间和chunk_size。在根据chunk_size来判断是否需要 flush 的时候使用了<code>in_writing_</code>变量，这个变量在flush 线程保存文件的时候会设置成 <code>true</code>，也就是如果 flush还在 flush，即使 chunk_size 超了，也不会触发 flush，而是会选择自发的累积。但是根据累积时间来判断的时候却没有使用<code>in_writing</code>这个变量。按道理加上也没问题，但是没有加，我觉得可能是出于以下的考虑：
+<ul>
+<li>自动驾驶数据通常按固定频率产生,这个系统能正常工作的前提是 flush 的速度超过写入的速度。所以综上两点，默认在一段时间内 flush 线程可以提前处理完所有数据。</li>
+<li>可以同时设置<code>chunk_interval</code>进行托底。如果的确某一个时间点数据出现了峰值，flush 线程来不及处理，数据可以先缓存在<code>chunk_active_</code>中，也即内存中。</li>
+</ul>
+</li>
+</ul>
+<h1 id="读取单个-record的实现">读取单个 Record的实现</h1>
+<p>之前已经讨论了写入一个Section的过程，读取的过程就是与之相反的过程，先读Section，这个的长度是固定的，然后根据读取的Section中<code>Size</code>读取后面的ProtoMessage进行反序列化：</p>
+<ul>
+<li>读取Section对应的是<code>bool RecordFileReader::ReadSection(Section* section)</code>。</li>
+<li>读取后面的ProtoMessage对应的函数是<code>bool RecordFileReader::ReadSection&lt;T&gt;(int64_t size, T* message)</code> 。<br>
+下面我将这两个函数摘录出来，并去掉一些不重要的代码。</li>
+</ul>
+<pre><code class="language-c++">bool RecordFileReader::ReadSection(Section* section) {
+  //return true：读取成功，false 表示读取失败
+  ssize_t count = read(fd_, section, sizeof(struct Section));
+  if (count &lt; 0) {//读取失败
+    return false;
+  } else if (count == 0) {//说明没有更多数据了，文件读完了。
+    end_of_file_ = true;
+    return false;
+  } else if (count != sizeof(struct Section)) {//读取失败
+    return false;
+  }
+  return true;//表示读取成功。
+}
+
+template &lt;typename T&gt;
+bool RecordFileReader::ReadSection(int64_t size, T* message) {
+  FileInputStream raw_input(fd_, static_cast&lt;int&gt;(size));//截取size长度的数据
+  CodedInputStream coded_input(&amp;raw_input);
+  CodedInputStream::Limit limit = coded_input.PushLimit(static_cast&lt;int&gt;(size));
+  //进行反序列化。得到Message，Message是Header、Channel或者Chubk等。
+  if (!message-&gt;ParseFromCodedStream(&amp;coded_input)) {
+    end_of_file_ = coded_input.ExpectAtEnd();
+    return false;
+  }
+  if (!coded_input.ConsumedEntireMessage()) {
+    AERROR &lt;&lt; &quot;Do not consumed entire message.&quot;;
+    return false;
+  }
+  coded_input.PopLimit(limit);
+  //得到的Message的长度和Section中记载的不一样，报错。
+  if (static_cast&lt;int64_t&gt;(message-&gt;ByteSizeLong()) != size) {
+    AERROR &lt;&lt; &quot;Message size is not consistent in section header&quot;
+           &lt;&lt; &quot;, expect: &quot; &lt;&lt; size &lt;&lt; &quot;, actual: &quot; &lt;&lt; message-&gt;ByteSizeLong();
+    return false;
+  }
+  return true;
+}
+</code></pre>
+<p>将上面两个函数组合起来就可以实现对于Record文件的连续读取。</p>
+<pre><code class="language-c++">bool RecordReader::ReadNextChunk(uint64_t begin_time, uint64_t end_time) {
+  bool skip_next_chunk_body = false;
+  while (!reach_end_) {
+    Section section;
+    //读取section
+    if (!file_reader_-&gt;ReadSection(&amp;section)) {
+      return false;
+    }
+    //根据section信息读取后面的Proto信息
+    switch (section.type) {
+      case SectionType::SECTION_INDEX: {
+        file_reader_-&gt;SkipSection(section.size);
+        reach_end_ = true;
+        break;
+      }
+      case SectionType::SECTION_CHANNEL: {
+        ADEBUG &lt;&lt; &quot;Read channel section of size: &quot; &lt;&lt; section.size;
+        Channel channel;
+        if (!file_reader_-&gt;ReadSection&lt;Channel&gt;(section.size, &amp;channel)) {
+          AERROR &lt;&lt; &quot;Failed to read channel section.&quot;;
+          return false;
+        }
+        break;
+      }
+      /*
+        省略后面相似的代码
+      */
+    }
+  }
+  return false;
+}
+</code></pre>
+<h1 id="多个-record的写入实现">多个 Record的写入实现</h1>
+<p>Record支持分Segment的功能，当满足一定条件后自动分文件写入，类似于压缩包分割，这样的好处有：</p>
+<ul>
+<li>方便传输，设想传输一个10G的文件，传输时间长，而且中途要是被打断重新传输的成本很高。</li>
+<li>提高容错率，其中一个文件出了问题，不影响其他文件。还是假设要录制10G的文件，如果最后出了错，那么这个10G的文件可能都无法使用了，但是如果分成10个1G的文件，那么前面9个1G的文件都还可以使用。<br>
+对于自动驾驶这个数据量级很大的行业，分Segment的这个功能还是蛮有必要的，以下是其主要的实现代码。</li>
+</ul>
+<pre><code class="language-c++">bool RecordWriter::WriteMessage(const SingleMessage&amp; message) {
+  std::lock_guard&lt;std::mutex&gt; lg(mutex_);//加上锁，多线程安全、
+  OnNewMessage(message.channel_name());
+  if (!file_writer_-&gt;WriteMessage(message)) {//写入message
+    AERROR &lt;&lt; &quot;Write message is failed.&quot;;
+    return false;
+  }
+
+  segment_raw_size_ += message.content().size();//更新 segment_size
+  if (segment_begin_time_ == 0) {//更新segment_begin_time_
+    segment_begin_time_ = message.time();
+  }
+  if (segment_begin_time_ &gt; message.time()) {
+    segment_begin_time_ = message.time();
+  }
+
+  if ((header_.segment_interval() &gt; 0 &amp;&amp;//判断是否满足分 segment 的条件
+       message.time() - segment_begin_time_ &gt; header_.segment_interval()) ||
+      (header_.segment_raw_size() &gt; 0 &amp;&amp;
+       segment_raw_size_ &gt; header_.segment_raw_size())) {
+    file_writer_backup_.swap(file_writer_);
+    file_writer_backup_-&gt;Close();
+    if (!SplitOutfile()) {//具体分 segment 的实现
+      AERROR &lt;&lt; &quot;Split out file is failed.&quot;;
+      return false;
+    }
+  }
+  return true;
+}
+</code></pre>
+<pre><code class="language-c++">bool RecordWriter::SplitOutfile() {
+  file_writer_.reset(new RecordFileWriter());//为新record创建file_writer
+  if (file_index_ &gt; 99999) {
+    AWARN &lt;&lt; &quot;More than 99999 record files had been recored, will restart &quot;
+          &lt;&lt; &quot;counting from 0.&quot;;
+    file_index_ = 0;
+  }
+  sstream_.str(std::string());
+  sstream_.clear();
+  sstream_ &lt;&lt; &quot;.&quot; &lt;&lt; std::setw(5) &lt;&lt; std::setfill('0') &lt;&lt; file_index_++ &lt;&lt; &quot;.&quot;;
+  path_ = file_ + sstream_.str() +//根据规则生成名称
+          UnixSecondsToString(time(nullptr), &quot;%Y%m%d%H%M%S&quot;);
+  segment_raw_size_ = 0;
+  segment_begin_time_ = 0;
+  if (!file_writer_-&gt;Open(path_)) {//根据名称创建record
+    AERROR &lt;&lt; &quot;Failed to open record file: &quot; &lt;&lt; path_;
+    return false;
+  }
+  if (!file_writer_-&gt;WriteHeader(header_)) {//写入缓存的Header信息
+    AERROR &lt;&lt; &quot;Failed to write header for record file: &quot; &lt;&lt; path_;
+    return false;
+  }
+  for (const auto&amp; i : channel_message_number_map_) {//写入缓存的channel信息
+    Channel channel;
+    channel.set_name(i.first);
+    channel.set_message_type(channel_message_type_map_[i.first]);
+    channel.set_proto_desc(channel_proto_desc_map_[i.first]);
+    if (!file_writer_-&gt;WriteChannel(channel)) {
+      AERROR &lt;&lt; &quot;Failed to write channel for record file: &quot; &lt;&lt; path_;
+      return false;
+    }
+  }
+  return true;
+}
+</code></pre>
+<p>思路比较直接，之前一直缓存 Header 和 Channel 信息，在写入消息的过程中不断地判断是否满足创建新 segment 的条件，当满足条件的时候，先保存当前 Record，然后根据规则，确定新的 Record的名称，同时创建新的<code>record_file_writer</code>并将之前缓存的 Header 和 Channel 信息写入到新Record中，之后新的消息也直接写入新的Record中。</p>
+<h1 id="读取多个-record-的实现">读取多个 Record 的实现</h1>
+<p>Record 格式有分Segment 的功能，即将一段连续数据分成多个 Record 保存，对应地也有自动读取多个相关联 Record 地功能，这个的实现主要是在<code>record_viewer.cc</code>，<code>RecordViewer</code>既支持单个 Record，也支持多个 Record，这里只讨论多个 Record 的，因为前者相对于后者是更简单的情况。<br>
+思路是封装出了一个统一的迭代器接口，具体来说：</p>
+<ol>
+<li>复用之前的<code>RecordReader</code>,为每一个Record 创建一个<code>RecordReader</code>负责读取。</li>
+<li>根据每一个 Record 中Header 存储的<code>begin_time()</code>进行排序，按照升序排列。</li>
+<li>排序完成后从最开始的 Record 进行读取，将读取的数据放到一个 buffer 中，同时创建一个迭代器，每次迭代器都从buffer 中获取数据，迭代器更新的的时候，buffer 对应更新。</li>
+</ol>
+<p>buffer 的定义如下<code>std::multimap&lt;uint64_t, std::shared_ptr&lt;RecordMessage&gt;&gt; </code>。 使用的数据结构是multimap，有以下特点：</p>
+<ul>
+<li>key可以相同，因为有可能有两个消息的时间戳就是相同的，所以没有使用<code>std::map</code></li>
+<li><code>std::multimap</code>是自排序的，能够保证时间顺序。</li>
+</ul>
+<p>关键代码：</p>
+<ul>
+<li>
+<p>对传进来的reader按照<code>begin_time()</code>进行排序：</p>
+<pre><code class="language-C++">  std::sort(readers_.begin(), readers_.end(),
+          [](const RecordReaderPtr&amp; lhs, const RecordReaderPtr&amp; rhs) {
+            const auto&amp; lhs_header = lhs-&gt;GetHeader();
+            const auto&amp; rhs_header = rhs-&gt;GetHeader();
+            if (lhs_header.begin_time() == rhs_header.begin_time()) {
+              return lhs_header.end_time() &lt; rhs_header.end_time();
+            }
+            return lhs_header.begin_time() &lt; rhs_header.begin_time();
+          });
+</code></pre>
+</li>
+<li>
+<p>更新buffer:</p>
+<pre><code class="language-c++">bool RecordViewer::FillBuffer() {
+while (curr_begin_time_ &lt;= end_time_ &amp;&amp; msg_buffer_.size() &lt; kBufferMinSize) {
+    uint64_t this_begin_time = curr_begin_time_;
+    uint64_t this_end_time = this_begin_time + kStepTimeNanoSec;//kStepTimeNanoSec是1s，也就是每次读取1s的内容。
+    if (this_end_time &gt; end_time_) {
+    this_end_time = end_time_;
+    }
+
+    //根据当前时间戳来判断这个reader是否已经读过
+    for (size_t i = 0; i &lt; readers_.size(); ++i) {
+    if (!readers_finished_[i] &amp;&amp;
+        readers_[i]-&gt;GetHeader().end_time() &lt; this_begin_time) {
+        readers_finished_[i] = true;
+        readers_[i]-&gt;Reset();
+    }
+    }
+    //找到有效的reader读取数据并放到buffer中。
+    for (size_t i = 0; i &lt; readers_.size(); ++i) {
+    if (readers_finished_[i]) {
+        continue;
+    }
+    auto&amp; reader = readers_[i];
+    while (true) {
+        auto record_msg = std::make_shared&lt;RecordMessage&gt;();
+        if (!reader-&gt;ReadMessage(record_msg.get(), this_begin_time,
+                                this_end_time)) {
+        break;
+        }
+        msg_buffer_.emplace(std::make_pair(record_msg-&gt;time, record_msg));
+    }
+    }
+
+    // because ReadMessage of RecordReader is closed interval, so we add 1 here
+    curr_begin_time_ = this_end_time + 1;
+}
+
+return !msg_buffer_.empty();
+}
+</code></pre>
+</li>
+<li>
+<p>对迭代器的封装：</p>
+<pre><code class="language-c++">RecordViewer::Iterator&amp; RecordViewer::Iterator::operator++() {
+index_++;
+//迭代器递增的时候，调用Update函数，更新底层实际的值。
+if (!viewer_-&gt;Update(&amp;message_instance_)) {
+    end_ = true;
+}
+return *this;
+}
+//对于迭代器-&gt; 操作符的实现
+RecordViewer::Iterator::pointer RecordViewer::Iterator::operator-&gt;() {
+return &amp;message_instance_;
+}
+//对于迭代器* 操作符的实现
+RecordViewer::Iterator::reference RecordViewer::Iterator::operator*() {
+return message_instance_;
+}
+
+bool RecordViewer::Update(RecordMessage* message) {
+bool find = false;
+do {
+    //如果buffer为空，就更新buffer，也就是获取1s时长的数据。
+    if (msg_buffer_.empty() &amp;&amp; !FillBuffer()) {
+    break;
+    }
+    //直接获取buffer最开始的数据返回。
+    auto&amp; msg = msg_buffer_.begin()-&gt;second;
+    if (channels_.empty() || channels_.count(msg-&gt;channel_name) == 1) {
+    *message = *msg;
+    find = true;
+    }
+    msg_buffer_.erase(msg_buffer_.begin());//清除已经获取的数据
+} while (!find);
+
+return find;
+}
+</code></pre>
+</li>
+</ul>
+<p>总的来说是是一个十分巧妙的实现：</p>
+<ul>
+<li>通过迭代器将多个Record文件的读取封装成了统一的接口。用户不需要关心是从一个文件还是从多个文件读取数据，API接口始终保持一致。</li>
+<li>通过buffer进行缓存，相当于创建了一个滑动窗口，实现了懒加载，避免了一次性加载所有数据导致的内存压力，同时保持了高效访问。</li>
+</ul>
+<h1 id="总结与展望">总结与展望</h1>
+<p>现在完成了对于Record格式基础的学习，还有一些关于Record的周边功能，比如：</p>
+<ul>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recoverer.cc">recoverer</a>负责重建缺失的Index</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/spliter.cc">splitter</a>负责切分Record</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/recorder.cc">recorder</a>负责从CyberRT中将数据录制成Record</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/tools/cyber_recorder/info.cc">info</a>负责打印Record的基本信息。</li>
+<li><a href="https://github.com/ApolloAuto/apollo/blob/c48541b4c6b1b0acf432c7ccde92525c7bdb781d/cyber/python/cyber_py3/record.py">Record API的Python封装</a>，负责提供Python接口， 自己使用Pybind11也实现过相同的功能。</li>
+</ul>
+<p>以上功能都是基于基础的数据结构来实现的。理解了基础的数据结构和读写操作，理解这些并不麻烦。<br>
+读完了这个Record里面的代码，自己感觉收获良多，完成了从知其然到知其所以然的进步，里面许多巧妙的设计，比如整体的数据结构，对于并发写入的实现，迭代器的封装。我相信都是很好的设计，到现在也有借鉴意义。</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li><a href="#record%E6%A0%BC%E5%BC%8F%E7%9A%84%E4%B8%80%E4%BA%9B%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5">Record格式的一些基本概念</a></li>
+<li><a href="#%E5%9F%BA%E6%9C%AC%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84">基本数据结构</a>
+<ul>
+<li><a href="#header%E7%9A%84%E5%AE%9A%E4%B9%89">Header的定义</a></li>
+<li><a href="#chunk%E7%9B%B8%E5%85%B3%E7%9A%84%E5%AE%9A%E4%B9%89">Chunk相关的定义</a></li>
+<li><a href="#index%E7%9A%84%E5%AE%9A%E4%B9%89">Index的定义</a></li>
+<li><a href="#channel%E7%9A%84%E5%AE%9A%E4%B9%89">Channel的定义</a></li>
+</ul>
+</li>
+<li><a href="#%E6%94%AF%E6%8C%81%E5%A4%9A%E7%A7%8Dmessage%E6%A0%BC%E5%BC%8F">支持多种Message格式</a></li>
+<li><a href="#%E6%96%87%E4%BB%B6%E7%B3%BB%E7%BB%9F%E5%BA%95%E5%B1%82%E5%87%BD%E6%95%B0">文件系统底层函数</a></li>
+<li><a href="#record-%E7%9A%84%E5%86%99%E5%85%A5%E5%AE%9E%E7%8E%B0">Record 的写入实现</a></li>
+<li><a href="#chunk%E5%B9%B6%E8%A1%8C%E5%86%99%E5%85%A5%E7%9A%84%E5%AE%9E%E7%8E%B0">chunk并行写入的实现</a></li>
+<li><a href="#%E8%AF%BB%E5%8F%96%E5%8D%95%E4%B8%AA-record%E7%9A%84%E5%AE%9E%E7%8E%B0">读取单个 Record的实现</a></li>
+<li><a href="#%E5%A4%9A%E4%B8%AA-record%E7%9A%84%E5%86%99%E5%85%A5%E5%AE%9E%E7%8E%B0">多个 Record的写入实现</a></li>
+<li><a href="#%E8%AF%BB%E5%8F%96%E5%A4%9A%E4%B8%AA-record-%E7%9A%84%E5%AE%9E%E7%8E%B0">读取多个 Record 的实现</a></li>
+<li><a href="#%E6%80%BB%E7%BB%93%E4%B8%8E%E5%B1%95%E6%9C%9B">总结与展望</a></li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://WatsonShum.github.io/post/zi-ji-shi-xian-yi-ge-tuple/">
+              <h3 class="post-title">
+                自己实现一个 Tuple
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://WatsonShum.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>
